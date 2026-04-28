@@ -8,18 +8,24 @@
 //! matters).
 
 use crate::agents::messages::AgentEvent;
+use std::sync::atomic::{AtomicI64, Ordering};
+use std::sync::Arc;
 use tokio::sync::broadcast::{self, Receiver, Sender};
 use tracing::warn;
 
 #[derive(Clone)]
 pub struct MessageBus {
     tx: Sender<AgentEvent>,
+    last_warn_us: Arc<AtomicI64>,
 }
 
 impl MessageBus {
     pub fn new(capacity: usize) -> Self {
         let (tx, _rx) = broadcast::channel(capacity);
-        Self { tx }
+        Self {
+            tx,
+            last_warn_us: Arc::new(AtomicI64::new(0)),
+        }
     }
 
     pub fn subscribe(&self) -> Receiver<AgentEvent> {
@@ -28,11 +34,19 @@ impl MessageBus {
 
     /// Publish an event. Errors are logged but never propagated — losing
     /// a subscriber must not break the producer.
+    ///
+    /// Throttle the "no subscribers" warning to at most once per second.
+    /// This avoids flooding the log with thousands of identical lines
+    /// during normal shutdown when every receiver drops at once and the
+    /// data agent is still draining its tick buffer.
     pub fn publish(&self, ev: AgentEvent) {
         if let Err(e) = self.tx.send(ev) {
-            // No subscribers is fine (initial boot); log only when we
-            // expected someone to care.
-            warn!(err = %e, "event dropped — no subscribers?");
+            let now_us = chrono::Utc::now().timestamp_micros();
+            let last = self.last_warn_us.load(Ordering::Relaxed);
+            if now_us.saturating_sub(last) > 1_000_000 {
+                self.last_warn_us.store(now_us, Ordering::Relaxed);
+                warn!(err = %e, "event dropped — no subscribers? (throttled, will not repeat for 1s)");
+            }
         }
     }
 }
