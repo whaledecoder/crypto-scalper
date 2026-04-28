@@ -14,6 +14,34 @@ use std::sync::Arc;
 use tokio::task::JoinHandle;
 use tracing::{info, warn};
 
+/// Running counters used by the periodic status log so the operator
+/// can see at a glance that the bot is actually receiving market
+/// data and evaluating strategies (it is otherwise silent for minutes
+/// at a time on 5m timeframes).
+#[derive(Default)]
+struct StatusCounters {
+    ticks: HashMap<String, u64>,
+    candles: HashMap<String, u64>,
+    signals: u64,
+    brain_calls: u64,
+    manager_calls: u64,
+    manager_vetoes: u64,
+    orders_filled: u64,
+}
+
+fn fmt_counts(map: &HashMap<String, u64>) -> String {
+    if map.is_empty() {
+        return "-".to_string();
+    }
+    let mut entries: Vec<(&String, &u64)> = map.iter().collect();
+    entries.sort_by(|a, b| a.0.cmp(b.0));
+    entries
+        .iter()
+        .map(|(s, n)| format!("{}:{}", s, n))
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
 pub fn spawn(
     bus: MessageBus,
     metrics: Arc<MetricsState>,
@@ -25,21 +53,63 @@ pub fn spawn(
     // its reasoning to a trade record once the order actually fills.
     let last_brain: Arc<PlMutex<HashMap<String, BrainOutcome>>> =
         Arc::new(PlMutex::new(HashMap::new()));
+    let counters: Arc<PlMutex<StatusCounters>> = Arc::new(PlMutex::new(StatusCounters::default()));
+
+    // Periodic status log — every 30s emit a single INFO line summarising
+    // ws/data/signal/brain/manager activity. Quiet bot does not mean dead bot.
+    {
+        let counters = counters.clone();
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(std::time::Duration::from_secs(30));
+            // Skip the immediate first tick — counters would all be zero.
+            tick.tick().await;
+            loop {
+                tick.tick().await;
+                let c = counters.lock();
+                info!(
+                    ticks = %fmt_counts(&c.ticks),
+                    candles = %fmt_counts(&c.candles),
+                    signals = c.signals,
+                    brain = c.brain_calls,
+                    manager = c.manager_calls,
+                    vetoes = c.manager_vetoes,
+                    fills = c.orders_filled,
+                    "status"
+                );
+            }
+        });
+    }
+
     tokio::spawn(async move {
         info!("monitor agent starting");
         while let Ok(ev) = rx.recv().await {
             match ev {
                 AgentEvent::Shutdown => break,
+                AgentEvent::Tick { symbol, .. } => {
+                    *counters.lock().ticks.entry(symbol).or_insert(0) += 1;
+                }
+                AgentEvent::CandleClosed { symbol, .. } => {
+                    *counters.lock().candles.entry(symbol).or_insert(0) += 1;
+                }
                 AgentEvent::PreSignalEmitted { .. } => {
                     metrics.update(|m| m.signals_today += 1);
+                    counters.lock().signals += 1;
                 }
                 AgentEvent::BrainOutcomeReady(brain) => {
                     last_brain
                         .lock()
                         .insert(brain.signal.symbol.clone(), brain.clone());
                     record_brain(&metrics, &brain);
+                    counters.lock().brain_calls += 1;
                 }
                 AgentEvent::ManagerVerdictEmitted(v) => {
+                    {
+                        let mut c = counters.lock();
+                        c.manager_calls += 1;
+                        if matches!(v.action, ManagerAction::Veto { .. }) {
+                            c.manager_vetoes += 1;
+                        }
+                    }
                     if matches!(v.action, ManagerAction::Veto { .. }) {
                         info!(
                             symbol = %v.proposal.symbol,
@@ -54,6 +124,7 @@ pub fn spawn(
                     size,
                     ack,
                 } => {
+                    counters.lock().orders_filled += 1;
                     let brain = last_brain.lock().get(&symbol).cloned();
                     if let Some(brain) = brain {
                         if let Err(e) =
