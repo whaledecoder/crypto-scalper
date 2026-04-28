@@ -1,123 +1,154 @@
 # ARIA — Autonomous Realtime Intelligence Analyst
 
 LLM-powered autonomous crypto scalping bot, written in Rust. ARIA combines
-deterministic technical analysis with an LLM decision engine that evaluates
-the full market context (news, social sentiment, on-chain, funding) before
-every trade.
+deterministic technical analysis with a multi-agent runtime where every
+layer of the stack runs as an independent `tokio` task communicating
+over a typed `MessageBus`. A `TraderManagerAgent` (second LLM) gives the
+final approve/veto/adjust verdict on every trade, and a `SurvivalAgent`
+polices the bot's own equity so it stays alive long enough to keep
+trading.
+
+> **Trade for life.** The default bias is *Veto*. The default behaviour
+> on any LLM error is *Veto*. The default behaviour on any equity
+> breach is *flat all positions and freeze*. Survival > opportunity.
 
 ```
-┌────────────────────────────────────────────────────────────────────────────┐
-│ Layer 1 — Data        │ Binance WS/REST · news · on-chain · F&G · funding  │
-│ Layer 2 — Signal      │ 10+ indicators · regime detector · 5 strategies    │
-│ Layer 3 — Brain       │ Context packet → Claude → GO/NO_GO/WAIT            │
-│ Layer 4 — Execution   │ Risk gates · position sizer · Binance OCO          │
-│ Layer 5 — Monitoring  │ SQLite journal · Telegram · /metrics HTTP          │
-│ Layer 6 — Learning    │ Trade history → lessons → adaptive policy          │
-└────────────────────────────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────────────┐
+│ 12-agent runtime, all on a single tokio::sync::broadcast bus         │
+│                                                                      │
+│  Data → Signal → Risk → Brain → Manager → Execution                  │
+│   │       │       │       │        │           │                     │
+│   └─── Feeds ─────┘       │        │           │                     │
+│                           │        │           │                     │
+│  Learning ────────────────┘        │           │                     │
+│                                    │           │                     │
+│  Survival ──── broadcasts SurvivalUpdated to every agent ────────────┤
+│  Control  ──── Telegram + /tmp/aria.control ingress  ────────────────┤
+│  Watchdog ──── heartbeat dead-man-switch  ───────────────────────────┘
+│  Monitor  ──── SQLite journal · Telegram · /metrics, /lessons,       │
+│                /survival, /dashboard HTTP                            │
+└──────────────────────────────────────────────────────────────────────┘
 ```
 
-### Layer 6 — Learning system
+## Documentation Index
 
-Every closed trade lands in the SQLite journal with all of its TA + LLM
-context. A background task refreshes a `LearningPolicy` from the journal
-every 5 minutes, deriving stats and turning them into actionable rules:
+- **[INSTALL.md](INSTALL.md)** — step-by-step installation: prerequisites,
+  build, configure, paper / live / backtest, troubleshooting.
+- **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)** — full architecture
+  (12 agents, MessageBus, AgentEvent enum, message flow per scenario).
+- **[docs/SURVIVAL.md](docs/SURVIVAL.md)** — `survive_score` formula,
+  `SurvivalMode` transitions, cooldown windows, death line, ratchet.
+- **[docs/CONTROL.md](docs/CONTROL.md)** — Telegram commands, file
+  ingress, watchdog, `/survival` & `/dashboard` HTTP endpoints.
+- **[docs/CONFIG.md](docs/CONFIG.md)** — every config section with
+  defaults and meaning.
 
-| Lesson | Trigger | Action |
-|---|---|---|
-| `LoseStreak` | ≥3 losses in a row on `(strategy, symbol)` | Skip 30 min |
-| `StrategyDerate` | Strategy WR < 35% over ≥8 trades | +10 TA threshold, ½ size, LLM floor 80 |
-| `StrategyBoost` | Strategy WR ≥ 65% & PF ≥ 1.5 | −5 TA threshold, 1.2× size |
-| `RegimeBlacklist` | `(strategy, regime)` WR < 30% over ≥12 trades | Drop from regime selector for 12h |
-| `LlmCalibration` | LLM 80–100 confidence picks land < 40% WR | Raise `min_confidence` to 90 |
-| `SymbolDerate` | Symbol net negative over ≥8 trades, WR < 35% | Pause symbol 24h |
-| `DrawdownCooldown` | ≤−5% equity in last 60 min over ≥2 trades | Pause everything 60 min |
+## Highlights
 
-The policy is consulted at every layer:
+- **6 logical layers, 12 agents** — Data, Feeds, Signal, Risk, Brain,
+  Manager, Execution, Monitor, Learning, Survival, Control, Watchdog.
+- **LLM via OpenRouter by default** — one key (`OPENROUTER_API_KEY`)
+  unlocks Claude / GPT / Gemini / DeepSeek / Qwen. Anthropic native,
+  OpenAI, Together, and Groq are all supported via the same engine.
+- **Broker-side risk** — every entry pushes a paired `STOP_MARKET` +
+  `TAKE_PROFIT_MARKET` to Binance with `closePosition=true`, so the
+  position exits even if the bot crashes.
+- **Idempotent client_order_id** — deterministic hash of
+  `(symbol, strategy, side, entry, size, 1-minute bucket)`. Retries
+  are de-duplicated by the exchange instead of producing duplicates.
+- **Equity reconciliation** — `Exchange::fetch_equity_usd()` polled
+  every 60 s. The in-memory `RiskManager` is always synced to broker truth.
+- **Position reconciliation at startup** — restarted bot picks up
+  positions that were already open at the broker via
+  `fetch_open_positions()` + `PositionBook::reconcile`.
+- **SurvivalAgent** — computes a 0–100 `survive_score` from drawdown,
+  daily loss, loss streaks, news regime, and equity-floor proximity.
+  Translates that into `SurvivalMode { Healthy, Cautious, Defensive,
+  Frozen, Dead }` with size multipliers (1.0 / 0.6 / 0.3 / 0 / 0).
+- **Manager LLM fails CLOSED** — on timeout/error → `Veto`. When
+  survival mode is `Frozen` or `Dead`, the LLM is short-circuited
+  with an instant Veto.
+- **Operator control panel** — `/status`, `/positions`, `/freeze`,
+  `/unfreeze`, `/flat`, `/health` over Telegram, plus a panic file at
+  `/tmp/aria.control` (`echo flat >> /tmp/aria.control`).
+- **Inter-agent watchdog** — every agent emits heartbeats; if any
+  monitored agent goes silent past the threshold, `Watchdog` auto-issues
+  a `Freeze` and unfreezes again when liveness returns.
+- **Adaptive learning** — Layer 6 derives lessons (lose-streak,
+  derate, boost, regime blacklist, LLM calibration, drawdown cooldown)
+  from the SQLite journal every 5 minutes and feeds them back into
+  every layer.
 
-- **Layer 2** (`select_strategies`): blacklisted `(strategy, symbol)` combos are
-  filtered out before evaluation.
-- **Layer 3** (LLM context): `[HISTORICAL PERFORMANCE]` block is injected
-  into the prompt so the LLM can reason about what worked/failed recently.
-- **Layer 3 LLM gate**: confidence floor is raised when the calibration
-  lesson is active.
-- **Layer 4** (Risk): position size is multiplied by the verdict's size
-  multiplier (zero on blocks, 0.5× on derate, 1.2× on boost).
-- **Layer 5** (Monitoring): `/lessons` and `/dashboard` HTTP endpoints
-  expose the currently active lessons.
+## Quick Start (Paper Mode, ~3 minutes)
+
+> See **[INSTALL.md](INSTALL.md)** for a fuller walkthrough including
+> live trading and Telegram setup.
 
 ```bash
-curl http://localhost:9184/dashboard | jq .
-# {
-#   "metrics": { ..., "active_lessons": 3 },
-#   "lessons": [
-#     {"kind":"LoseStreak","strategy":"vwap_scalp","symbol":"BTCUSDT", ...},
-#     {"kind":"StrategyBoost","strategy":"ema_ribbon", ...},
-#     ...
-#   ]
-# }
-```
-
-## Features
-
-- **Incremental indicators** (EMA, RSI, Bollinger, ATR, ADX, VWAP, Choppiness,
-  Keltner, ROC) — all updating per closed candle, no bulk recomputation.
-- **Market regime detector** (Trending / Ranging / Volatile / Squeeze) with
-  ADX + Choppiness + BB-in-KC test.
-- **5 strategies** — Mean Reversion, Momentum Breakout, VWAP Scalp, EMA Ribbon,
-  Volatility Squeeze. Each emits a `PreSignal` with a TA confidence score.
-- **LLM decision engine** — Anthropic Claude 3.5 Haiku by default. Falls back to
-  TA-only if the API times out (5 s) or the key is missing.
-- **Risk manager** — per-trade sizing by risk %, circuit breakers for daily
-  loss, drawdown, and max open positions.
-- **Execution abstraction** — Binance Futures REST (HMAC-SHA256 signed) or
-  in-process paper exchange for dry-run.
-- **SQLite trade journal** — every decision (including the full LLM reasoning)
-  is stored for post-trade review and future fine-tuning.
-- **HTTP metrics endpoint** — `/metrics` serves a JSON snapshot; `/healthz`
-  for uptime checks.
-- **Backtest engine** — replays historical OHLCV CSVs through the same signal
-  pipeline and reports WR, PF, Sharpe, Sortino, drawdown.
-
-## Quick Start
-
-```bash
-# 1. Build (requires Rust 1.85+)
+# 1. Clone + build (Rust 1.85+)
+git clone https://github.com/whaledecoder/crypto-scalper.git
+cd crypto-scalper
 cargo build --release
 
-# 2. Copy the example env and fill in your keys (all optional for paper mode)
+# 2. Get a free OpenRouter key (https://openrouter.ai/keys) and export it
 cp .env.example .env
-# Then: export $(grep -v '^#' .env | xargs)
+echo 'OPENROUTER_API_KEY=sk-or-v1-...' >> .env
+set -a; source .env; set +a
 
-# 3. Run in paper mode (default)
+# 3. Run in paper mode (default config — no real orders, no API keys needed
+#    for the exchange).
 ./target/release/aria
 
-# 4. Metrics are at http://localhost:9184/metrics
+# 4. Watch the dashboard
+curl -s http://localhost:9184/dashboard | jq .
+curl -s http://localhost:9184/survival  | jq .
 ```
 
-## Configuration
+The bot starts in **paper mode** by default — no real orders are sent.
+Flip `[mode] run_mode = "live"` and `dry_run = false` only after you
+have read [INSTALL.md](INSTALL.md) and verified everything in paper.
 
-Configuration is layered:
+## The 12 Agents
 
-1. `config/default.toml` — repository-tracked defaults (paper mode).
-2. `config/<overlay>.toml` — optional overlay pointed at by `ARIA_CONFIG_OVERLAY`.
-3. Environment variables — override any secret:
-   - `BINANCE_API_KEY`, `BINANCE_API_SECRET`
-   - `OPENROUTER_API_KEY` (default LLM provider)
-   - `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` / `TOGETHER_API_KEY` / `GROQ_API_KEY` — used when `[llm.provider]` is set accordingly
-   - `CRYPTOPANIC_API_KEY`, `LUNARCRUSH_API_KEY`,
-     `GLASSNODE_API_KEY`, `WHALE_ALERT_API_KEY`
-   - `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`
+| # | Agent | Owns | Reads | Emits |
+|---|---|---|---|---|
+| 1 | **DataAgent** | Binance WS, `OhlcvBuilder`, `OrderBook` | — | `Tick`, `BookTicker`, `CandleClosed` |
+| 2 | **FeedsAgent** | F&G, funding, news, sentiment, on-chain | — | `FeedsSnapshot` |
+| 3 | **SignalAgent** | regime detector + 5 strategies | candles, feeds, deadzone | `PreSignalEmitted` |
+| 4 | **RiskAgent** | 8-gate `RiskManager`, learning policy, funding gate, survival hard-gate | pre-signal, feeds, survival | `RiskVerdict` |
+| 5 | **BrainAgent** | `LlmEngine` (brain), `MarketContext` builder | risk verdict, feeds, history | `BrainOutcomeReady` |
+| 6 | **TraderManagerAgent** | manager LLM, fail-closed handler | brain outcome, survival | `ManagerVerdictEmitted` |
+| 7 | **ExecutionAgent** | `Exchange` impl, `PositionBook`, idempotent ID gen, broker-side SL/TP | manager verdict, control commands, survival | `OrderFilled`, `PositionClosed` |
+| 8 | **MonitorAgent** | Prometheus snapshot, SQLite journal, Telegram alerts | every event | (write only) |
+| 9 | **LearningAgent** | `LearningPolicy` refresh from journal | journal, position closes | `PolicyRefreshed` |
+| 10 | **SurvivalAgent** | `survive_score`, equity reconciliation, cooldowns, death-line auto-flat | every relevant event | `SurvivalUpdated`, `EquityReconciled`, `ControlCommand::FlatAll` |
+| 11 | **ControlAgent** | Telegram long-poll, `/tmp/aria.control` watcher, `RiskManager` sync | external commands | `ControlCommand::*` |
+| 12 | **WatchdogAgent** | per-agent heartbeat tracker | `Heartbeat` events | `ControlCommand::Freeze` / `Unfreeze` |
 
-Provided overlays:
+## Configuration at a Glance
 
-- `config/paper.toml` — forces `run_mode=paper`, `dry_run=true`.
-- `config/production.toml` — `run_mode=live`, tighter risk caps.
-- `config/llm-anthropic.toml` — switch LLM to Anthropic native.
-- `config/llm-openrouter-cheap.toml` — pick a cheap or free OpenRouter model.
+`config/default.toml` is the source of truth. Everything below has a
+sensible default — you can run with no overlay at all in paper mode.
+
+| Section | What it controls | See |
+|---|---|---|
+| `[mode]` | `run_mode` (paper / live / backtest), `dry_run` | [docs/CONFIG.md](docs/CONFIG.md#mode) |
+| `[exchange]` | Binance URLs, `api_key`, `api_secret`, `recv_window_ms` | [docs/CONFIG.md](docs/CONFIG.md#exchange) |
+| `[pairs]` | `symbols`, `timeframes` | [docs/CONFIG.md](docs/CONFIG.md#pairs) |
+| `[strategy]` | active strategies, TA confidence floor | [docs/CONFIG.md](docs/CONFIG.md#strategy) |
+| `[llm]` | brain LLM provider, model, key, fallback | [docs/CONFIG.md](docs/CONFIG.md#llm) |
+| `[manager]` | manager LLM (final verdict layer) | [docs/CONFIG.md](docs/CONFIG.md#manager) |
+| `[risk]` | per-trade %, max positions, daily-loss / drawdown / leverage / spread caps, equity | [docs/CONFIG.md](docs/CONFIG.md#risk) |
+| `[schedule]` | WIB dead-zone hours | [docs/CONFIG.md](docs/CONFIG.md#schedule) |
+| `[feeds]` | external feed API keys + RSS list | [docs/CONFIG.md](docs/CONFIG.md#feeds) |
+| `[monitoring]` | Telegram, log level, SQLite path, metrics bind | [docs/CONFIG.md](docs/CONFIG.md#monitoring) |
+| `[backtest]` | data dir, time window | [docs/CONFIG.md](docs/CONFIG.md#backtest) |
+| `[survival]` | death line, cooldowns, ratchet, news blackout | [docs/SURVIVAL.md](docs/SURVIVAL.md) |
+| `[control]` | Telegram command panel, allow-listed user IDs | [docs/CONTROL.md](docs/CONTROL.md) |
 
 ### LLM provider matrix
 
-| Provider | `provider =` | `api_base` | Auth header | Env var |
+| Provider | `provider =` | `api_base` | Auth | Env var |
 |---|---|---|---|---|
 | **OpenRouter** *(default)* | `"openrouter"` | `https://openrouter.ai/api/v1/chat/completions` | `Authorization: Bearer …` | `OPENROUTER_API_KEY` |
 | Anthropic native | `"anthropic"` | `https://api.anthropic.com/v1/messages` | `x-api-key: …` | `ANTHROPIC_API_KEY` |
@@ -129,27 +160,122 @@ OpenRouter sample models (price ≈ in/out per 1M tokens):
 
 | Model | Cost | Notes |
 |---|---|---|
-| `anthropic/claude-3.5-haiku` | $0.80 / $4 | Spec-default (smart, fast) |
+| `anthropic/claude-3.5-haiku` | $0.80 / $4 | Default — smart & fast |
 | `anthropic/claude-3.5-sonnet` | $3 / $15 | Best quality |
 | `openai/gpt-4o-mini` | $0.15 / $0.60 | Solid generalist |
-| `deepseek/deepseek-chat` | $0.14 / $0.28 | Cheap & sharp on TA reasoning |
+| `deepseek/deepseek-chat` | $0.14 / $0.28 | Cheap + sharp on TA reasoning |
 | `meta-llama/llama-3.3-70b-instruct` | $0.13 / $0.39 | Fast |
-| `google/gemini-2.0-flash-exp:free` | **FREE** | Rate-limited, great for paper-mode testing |
+| `google/gemini-2.0-flash-exp:free` | **FREE** | Rate-limited, fine for paper testing |
 | `qwen/qwen-2.5-72b-instruct:free` | **FREE** | Rate-limited |
 
-Activate with:
+## HTTP Endpoints
+
+The dashboard server (default `0.0.0.0:9184`) exposes:
+
+| Path | Returns |
+|---|---|
+| `/healthz` | `"ok"` plain text — for liveness probes |
+| `/metrics` | `MetricsSnapshot` JSON (mode, equity, daily PnL, positions, LLM stats, lesson count) |
+| `/lessons` | array of currently active `Lesson` records |
+| `/survival` | latest `SurvivalState` (or 404 if not yet computed) |
+| `/dashboard` | combined `{metrics, lessons, survival}` JSON |
+
+Example:
 
 ```bash
-ARIA_CONFIG_OVERLAY=config/paper.toml ./target/release/aria
+curl -s http://localhost:9184/dashboard | jq .
+# {
+#   "metrics": { "equity": 5037.4, "daily_pnl": 12.4, "active_lessons": 2, ... },
+#   "lessons": [ {"kind":"StrategyBoost","strategy":"ema_ribbon", ...}, ... ],
+#   "survival": {
+#       "score": 88,
+#       "mode": "Healthy",
+#       "size_multiplier": 1.0,
+#       "equity_usd": 5037.4,
+#       "death_line_usd": 3500.0,
+#       "drawdown_pct": 0.0,
+#       "consecutive_losses": 0,
+#       "reasons": []
+#   }
+# }
 ```
+
+## Operator Control Panel
+
+> Full reference: **[docs/CONTROL.md](docs/CONTROL.md)**.
+
+### Telegram (off by default)
+
+```toml
+[control]
+telegram_commands_enabled = true
+allowed_user_ids = [123456789]    # your Telegram user id; empty = lock down
+poll_secs = 3
+```
+
+Then export `TELEGRAM_BOT_TOKEN`. Commands:
+
+| Command | Effect |
+|---|---|
+| `/status` | equity, daily PnL, peak, drawdown, positions open, frozen state |
+| `/positions` | list open positions with entry / SL / TP |
+| `/freeze` | manual freeze — RiskManager rejects any new entry |
+| `/unfreeze` | resume trading |
+| `/flat` | close all positions at market (panic button) |
+| `/health` | `❤️ OK` |
+| `/help` / `/start` | shows the command list |
+
+### File ingress (always on)
+
+For shell-driven panics that don't need Telegram:
+
+```bash
+echo flat     >> /tmp/aria.control   # /flat equivalent
+echo freeze   >> /tmp/aria.control   # /freeze
+echo unfreeze >> /tmp/aria.control   # /unfreeze
+```
+
+The file is auto-truncated after each read.
+
+## Survival Mode
+
+> Full reference: **[docs/SURVIVAL.md](docs/SURVIVAL.md)**.
+
+```
+score = 100
+       - drawdown_penalty (max 60)
+       - daily_loss_penalty (max 40)
+       - loss_streak_penalty (max 30)
+       - news_penalty (panic 25 / euphoria 10)
+       - equity_floor_penalty (within 5% of death = -30)
+
+mode = if equity <= death_line              -> Dead     (size ×0)
+       else if cooldown / ratchet / score<25-> Frozen   (size ×0)
+       else if score < 50                   -> Defensive(size ×0.3)
+       else if score < 80                   -> Cautious (size ×0.6)
+       else                                 -> Healthy  (size ×1.0)
+```
+
+Cooldown windows:
+
+| Trigger | Pause |
+|---|---|
+| 3 consecutive losses on a `(strategy, symbol)` | 30 min |
+| 5 losses within 60 min (any symbol) | 4 hours |
+| 10 losses in a single day | 24 hours |
+| Daily PnL crosses **+2 %** | Lock half the gain (frozen until rebuilt) |
+| Equity ≤ 0.70 × initial (death line) | **Dead** — auto-flat + permanent freeze |
+| Drawdown ≥ 8 % from peak | Auto-flat all positions + `Frozen` |
+| News score < −0.6 (panic) | Freeze 2 h |
+| News score > +0.8 (euphoria) | Halve size |
 
 ## Modes
 
-| Mode       | Effect                                                              |
-|------------|---------------------------------------------------------------------|
-| `paper`    | Full pipeline, no real orders. Safe for tuning signals & LLM prompts. |
-| `live`     | Dispatches real orders to Binance (requires API keys + `dry_run=false`). |
-| `backtest` | Replays CSVs from `config.backtest.data_dir/<SYMBOL>.csv`.          |
+| Mode | Effect |
+|---|---|
+| `paper` | Full pipeline, simulated fills, no real orders. Default. |
+| `live` | Dispatches real orders to Binance (requires keys + `dry_run = false`). |
+| `backtest` | Replays CSVs from `[backtest] data_dir/<SYMBOL>.csv`. |
 
 ## Backtesting
 
@@ -159,88 +285,49 @@ Place historical candles at `data/historical/BTCUSDT.csv` with header:
 open_time_ms,open,high,low,close,volume
 ```
 
-Then run with `run_mode = "backtest"` in your overlay and it will produce a
-performance report per symbol.
+Run with `[mode] run_mode = "backtest"`; you'll get a per-symbol report
+with WR, profit factor, Sharpe, Sortino, and max drawdown.
 
 ## Project Layout
 
 ```
 src/
-├── config.rs           # TOML + ENV loader
-├── errors.rs           # ScalperError + Result alias
-├── data/               # Layer 1 — WS, OHLCV, order book
-├── indicators/         # 10+ incremental indicators
-├── strategy/           # Layer 2 — state, regime, 5 strategies
-├── feeds/              # news / sentiment / on-chain / funding / F&G
-├── llm/                # Layer 3 — context builder, prompts, engine
-├── execution/          # Layer 4 — risk, orders, exchange abstraction
-├── monitoring/         # Layer 5 — SQLite, Telegram, HTTP metrics
-├── learning/           # Layer 6 — performance memory, lessons, policy
-├── agents/             # multi-agent runtime (data/feeds/signal/risk/brain/manager/execution/monitor/learning)
-├── backtest/           # replay engine + performance metrics
-├── lib.rs              # module re-exports
-└── main.rs             # multi-agent orchestrator binary `aria`
+├── config.rs            # TOML + ENV loader (with [survival] / [control] defaults)
+├── data/                # Layer 1 — WS, OHLCV builder, order book
+├── indicators/          # Incremental TA primitives (EMA, RSI, BB, ATR, ADX, VWAP, …)
+├── strategy/            # Layer 2 — symbol state, regime detector, 5 strategies
+├── feeds/               # External feeds (F&G, funding, news, sentiment, on-chain)
+├── llm/                 # Layer 3 — context builder, prompts, multi-provider engine
+├── execution/           # Layer 4 — risk gates, paper/Binance exchanges, position book
+├── monitoring/          # Layer 5 — SQLite journal, Telegram, HTTP metrics/dashboard
+├── learning/            # Layer 6 — performance memory, lessons, policy
+├── agents/              # 12-agent runtime (data/feeds/signal/risk/brain/manager/
+│                        # execution/monitor/learning/survival/control/watchdog)
+├── backtest/            # Replay engine + performance metrics
+├── lib.rs               # Module re-exports
+└── main.rs              # Multi-agent orchestrator binary `aria`
 ```
 
-## Multi-Agent Architecture
-
-Every layer of the stack runs as an independent tokio task that
-communicates exclusively over a typed `MessageBus`
-(`tokio::sync::broadcast`, capacity 4096). Adding `[manager]
-enabled = true` to your config inserts a second LLM specialist —
-the `TraderManagerAgent` — between the brain and the execution
-agent so it can `Approve`, `Veto`, or `Adjust(size_mult, sl_offset_bps,
-tp_offset_bps)` every signal:
-
-```
-DataAgent → SignalAgent → RiskAgent → BrainAgent → TraderManagerAgent → ExecutionAgent
-   │            │             │           │                 │                │
-   │            └────── FeedsAgent ───────┘                 │                │
-   │                                                        │                │
-   └─────────────── LearningAgent (broadcasts policy refresh on every loop)──┘
-                                                                             │
-                                                          MonitorAgent ←─────┘
-```
-
-- `DataAgent` owns the WebSocket and OHLCV builders.
-- `FeedsAgent` polls fear&greed / funding / news / sentiment / on-chain.
-- `SignalAgent` runs the regime detector + active strategies.
-- `RiskAgent` applies the 8-gate `RiskManager` plus learning-policy filters.
-- `BrainAgent` builds the `MarketContext` and runs the brain LLM.
-- `TraderManagerAgent` consumes every other agent's output and gives the final verdict (optional, off by default).
-- `ExecutionAgent` dispatches the order and watches mark-price exits.
-- `MonitorAgent` writes metrics + journal + Telegram alerts.
-- `LearningAgent` rebuilds `LearningPolicy` from the trade journal every 5 minutes.
-
-To enable the manager LLM:
-
-```toml
-[manager]
-enabled = true
-provider = "openrouter"          # or "anthropic"
-model    = "anthropic/claude-3.5-haiku"
-fast_approve_min_conf = 90       # skip LLM call when brain conf >= this and no lessons matched
-```
-
-…then export `MANAGER_API_KEY` (or reuse `OPENROUTER_API_KEY` /
-`ANTHROPIC_API_KEY` — the manager falls back to the brain's key if
-its own is empty).
-
-
-## Running Tests
+## Quality Gates
 
 ```bash
 cargo fmt --all -- --check
-cargo clippy --all-targets --all-features -- -D warnings
-cargo test --lib
+cargo clippy --all-targets --all-features -- -D warnings   # 0 warnings
+cargo test --lib                                           # 34/34 passing
+cargo build --release
 ```
 
 ## Security Notes
 
-- Never commit `config/*.toml` with real API keys. Use environment variables
-  or a git-ignored overlay.
+- Never commit `config/*.toml` or `.env` with real secrets — the
+  `.gitignore` already blocks `.env`, but TOML overlays are your
+  responsibility.
 - `paper` mode never talks to the exchange and cannot place orders.
-- Risk limits are enforced **before** every order dispatch (8-gate system).
+- Risk limits are enforced **before** every order dispatch.
+- Manager LLM fails **closed** — when the LLM is unreachable, every
+  signal is vetoed.
+- Survival mode `Frozen` or `Dead` short-circuits the LLM entirely
+  with an instant Veto and refuses to open new positions.
 
 ## License
 
