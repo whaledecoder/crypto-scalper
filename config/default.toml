@@ -90,3 +90,31 @@ metrics_bind       = "0.0.0.0:9184"
 data_dir = "data/historical"
 from_ts  = ""
 to_ts    = ""
+
+[survival]
+# "Trade for life" — survival mode policer. See docs/SURVIVAL.md for the
+# full survive_score formula and mode transitions.
+enabled                            = true
+death_line_pct                     = 0.70    # equity floor as fraction of initial
+loss_streak_short                  = 3       # consecutive losses → 30 min cooldown
+loss_streak_short_cooldown_min     = 30
+loss_streak_long                   = 5       # losses-in-window → long cooldown
+loss_streak_long_window_min        = 60
+loss_streak_long_cooldown_min      = 240     # 4 hours
+daily_loss_count                   = 10      # losses in one day → 24h cooldown
+auto_flat_drawdown_pct             = 8.0     # drawdown that triggers flat-all
+refresh_secs                       = 15      # how often SurvivalState is recomputed
+equity_refresh_secs                = 60      # how often equity is reconciled with broker
+vol_spike_mult                     = 2.0     # ATR ratio above which sizes halve
+news_panic_threshold               = -0.6    # below this, freeze for 2h
+news_euphoria_threshold            = 0.8     # above this, halve size
+daily_pnl_ratchet_pct              = 2.0     # +2% gain triggers ratchet lock
+
+[control]
+# Operator control panel. See docs/CONTROL.md.
+# Set telegram_commands_enabled = true *and* add your numeric Telegram
+# user id to allowed_user_ids to enable /status, /freeze, /flat, etc.
+# The /tmp/aria.control file ingress is always available regardless.
+telegram_commands_enabled = false
+allowed_user_ids          = []
+poll_secs                 = 3
