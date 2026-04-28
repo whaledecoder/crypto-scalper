@@ -176,10 +176,56 @@ src/
 ├── execution/          # Layer 4 — risk, orders, exchange abstraction
 ├── monitoring/         # Layer 5 — SQLite, Telegram, HTTP metrics
 ├── learning/           # Layer 6 — performance memory, lessons, policy
+├── agents/             # multi-agent runtime (data/feeds/signal/risk/brain/manager/execution/monitor/learning)
 ├── backtest/           # replay engine + performance metrics
 ├── lib.rs              # module re-exports
-└── main.rs             # orchestrator binary `aria`
+└── main.rs             # multi-agent orchestrator binary `aria`
 ```
+
+## Multi-Agent Architecture
+
+Every layer of the stack runs as an independent tokio task that
+communicates exclusively over a typed `MessageBus`
+(`tokio::sync::broadcast`, capacity 4096). Adding `[manager]
+enabled = true` to your config inserts a second LLM specialist —
+the `TraderManagerAgent` — between the brain and the execution
+agent so it can `Approve`, `Veto`, or `Adjust(size_mult, sl_offset_bps,
+tp_offset_bps)` every signal:
+
+```
+DataAgent → SignalAgent → RiskAgent → BrainAgent → TraderManagerAgent → ExecutionAgent
+   │            │             │           │                 │                │
+   │            └────── FeedsAgent ───────┘                 │                │
+   │                                                        │                │
+   └─────────────── LearningAgent (broadcasts policy refresh on every loop)──┘
+                                                                             │
+                                                          MonitorAgent ←─────┘
+```
+
+- `DataAgent` owns the WebSocket and OHLCV builders.
+- `FeedsAgent` polls fear&greed / funding / news / sentiment / on-chain.
+- `SignalAgent` runs the regime detector + active strategies.
+- `RiskAgent` applies the 8-gate `RiskManager` plus learning-policy filters.
+- `BrainAgent` builds the `MarketContext` and runs the brain LLM.
+- `TraderManagerAgent` consumes every other agent's output and gives the final verdict (optional, off by default).
+- `ExecutionAgent` dispatches the order and watches mark-price exits.
+- `MonitorAgent` writes metrics + journal + Telegram alerts.
+- `LearningAgent` rebuilds `LearningPolicy` from the trade journal every 5 minutes.
+
+To enable the manager LLM:
+
+```toml
+[manager]
+enabled = true
+provider = "openrouter"          # or "anthropic"
+model    = "anthropic/claude-3.5-haiku"
+fast_approve_min_conf = 90       # skip LLM call when brain conf >= this and no lessons matched
+```
+
+…then export `MANAGER_API_KEY` (or reuse `OPENROUTER_API_KEY` /
+`ANTHROPIC_API_KEY` — the manager falls back to the brain's key if
+its own is empty).
+
 
 ## Running Tests
 

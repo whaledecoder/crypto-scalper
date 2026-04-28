@@ -39,6 +39,21 @@ min_confidence = 70
 fallback_ta_threshold = 75
 max_tokens = 1024
 
+[manager]
+# TraderManagerAgent — head-of-desk LLM that approves / vetoes / adjusts
+# every Brain decision. Disabled by default; flip `enabled` to true and
+# (optionally) export MANAGER_API_KEY to use a different model than the
+# brain. If `api_key` empty, falls back to the brain LLM key.
+enabled = false
+provider = "openrouter"
+api_base = "https://openrouter.ai/api/v1/chat/completions"
+model    = "anthropic/claude-3.5-haiku"
+timeout_secs = 6
+max_tokens   = 600
+fast_approve_min_conf = 90      # skip the manager call when brain conf >= this and no lessons matched
+http_referer   = "https://github.com/whaledecoder/crypto-scalper"
+http_app_title = "ARIA TraderManager"
+
 [risk]
 risk_per_trade_pct = 0.8
 max_open_positions = 3

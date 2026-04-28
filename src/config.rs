@@ -12,6 +12,8 @@ pub struct Config {
     pub pairs: Pairs,
     pub strategy: StrategyCfg,
     pub llm: LlmCfg,
+    #[serde(default)]
+    pub manager: ManagerCfg,
     pub risk: RiskCfg,
     pub schedule: Schedule,
     pub feeds: Feeds,
@@ -69,6 +71,69 @@ pub struct LlmCfg {
     /// Optional X-Title shown in OpenRouter dashboards.
     #[serde(default)]
     pub http_app_title: String,
+}
+
+/// Configuration for the TraderManagerAgent (multi-agent overseer LLM).
+/// Disabled by default — the bot runs in single-LLM mode unless this is
+/// explicitly turned on.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ManagerCfg {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default = "default_manager_provider")]
+    pub provider: String,
+    #[serde(default = "default_manager_api_base")]
+    pub api_base: String,
+    #[serde(default = "default_manager_model")]
+    pub model: String,
+    #[serde(default)]
+    pub api_key: String,
+    #[serde(default = "default_manager_timeout_secs")]
+    pub timeout_secs: u64,
+    #[serde(default = "default_manager_max_tokens")]
+    pub max_tokens: u32,
+    #[serde(default = "default_manager_fast_approve")]
+    pub fast_approve_min_conf: u8,
+    #[serde(default)]
+    pub http_referer: String,
+    #[serde(default)]
+    pub http_app_title: String,
+}
+
+fn default_manager_provider() -> String {
+    "openrouter".into()
+}
+fn default_manager_api_base() -> String {
+    "https://openrouter.ai/api/v1/chat/completions".into()
+}
+fn default_manager_model() -> String {
+    "anthropic/claude-3.5-haiku".into()
+}
+fn default_manager_timeout_secs() -> u64 {
+    6
+}
+fn default_manager_max_tokens() -> u32 {
+    600
+}
+fn default_manager_fast_approve() -> u8 {
+    90
+}
+
+impl Default for ManagerCfg {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            provider: default_manager_provider(),
+            api_base: default_manager_api_base(),
+            model: default_manager_model(),
+            api_key: String::new(),
+            timeout_secs: default_manager_timeout_secs(),
+            max_tokens: default_manager_max_tokens(),
+            fast_approve_min_conf: default_manager_fast_approve(),
+            http_referer: String::new(),
+            http_app_title: String::new(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -188,6 +253,16 @@ impl Config {
                     }
                 }
             }
+        }
+        // Manager LLM key (`MANAGER_API_KEY`) with fallback to the
+        // brain LLM key — usually you want the same provider for both.
+        if let Ok(v) = std::env::var("MANAGER_API_KEY") {
+            if !v.is_empty() {
+                self.manager.api_key = v;
+            }
+        }
+        if self.manager.api_key.is_empty() && !self.llm.api_key.is_empty() {
+            self.manager.api_key = self.llm.api_key.clone();
         }
         if let Ok(v) = std::env::var("CRYPTOPANIC_API_KEY") {
             self.feeds.cryptopanic_api_key = v;

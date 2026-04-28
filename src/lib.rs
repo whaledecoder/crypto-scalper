@@ -3,6 +3,7 @@
 //! Library root. Re-exports the public modules so the binary and tests can use
 //! them uniformly.
 
+pub mod agents;
 pub mod backtest;
 pub mod config;
 pub mod data;
