@@ -1,0 +1,73 @@
+# Default configuration — safe for local/dev. Override via config/local.toml or ENV.
+
+[mode]
+# "paper" runs without any real order dispatch (simulated fills).
+# "live"  sends real orders to the exchange (requires API keys).
+# "backtest" processes historical CSVs and exits.
+run_mode = "paper"
+dry_run  = true
+
+[exchange]
+name    = "binance"
+market  = "futures"     # spot | futures | testnet
+rest_base_url = "https://fapi.binance.com"
+ws_base_url   = "wss://fstream.binance.com/stream"
+api_key    = ""         # set via env BINANCE_API_KEY
+api_secret = ""         # set via env BINANCE_API_SECRET
+recv_window_ms = 5000
+
+[pairs]
+symbols    = ["BTCUSDT", "ETHUSDT", "SOLUSDT"]
+timeframes = ["5m"]
+
+[strategy]
+mode   = "adaptive"
+active = ["mean_reversion", "ema_ribbon", "momentum", "vwap_scalp", "squeeze"]
+min_ta_confidence = 65
+
+[llm]
+provider = "anthropic"
+model    = "claude-3-5-haiku-20241022"
+api_key  = ""           # set via env ANTHROPIC_API_KEY
+api_base = "https://api.anthropic.com/v1/messages"
+timeout_secs = 5
+min_confidence = 70
+fallback_ta_threshold = 75
+max_tokens = 1024
+
+[risk]
+risk_per_trade_pct = 0.8
+max_open_positions = 3
+max_daily_loss_pct = 3.0
+max_drawdown_pct   = 10.0
+max_leverage       = 5
+max_spread_pct     = 0.03
+equity_usd         = 5000.0
+
+[schedule]
+# 24h WIB (UTC+7) — dead zone skipped
+dead_zone_start_hour_wib = 3
+dead_zone_end_hour_wib   = 7
+
+[feeds]
+cryptopanic_api_key = ""   # env CRYPTOPANIC_API_KEY
+lunarcrush_api_key  = ""   # env LUNARCRUSH_API_KEY
+glassnode_api_key   = ""   # env GLASSNODE_API_KEY
+whalealert_api_key  = ""   # env WHALE_ALERT_API_KEY
+rss_feeds = [
+    "https://www.coindesk.com/arc/outboundfeeds/rss/",
+    "https://decrypt.co/feed",
+    "https://cointelegraph.com/rss",
+]
+
+[monitoring]
+telegram_bot_token = ""   # env TELEGRAM_BOT_TOKEN
+telegram_chat_id   = ""   # env TELEGRAM_CHAT_ID
+log_level          = "info"
+db_path            = "trades.db"
+metrics_bind       = "0.0.0.0:9184"
+
+[backtest]
+data_dir = "data/historical"
+from_ts  = ""
+to_ts    = ""

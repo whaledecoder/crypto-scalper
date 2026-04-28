@@ -1,0 +1,11 @@
+# Paper-trading overlay. Applied on top of default.toml.
+[mode]
+run_mode = "paper"
+dry_run  = true
+
+[risk]
+equity_usd = 5000.0
+risk_per_trade_pct = 0.5
+max_open_positions = 3
+max_daily_loss_pct = 3.0
+max_drawdown_pct   = 10.0
