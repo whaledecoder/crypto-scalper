@@ -8,12 +8,19 @@
 
 use anyhow::{Context, Result};
 use crypto_scalper::{
-    agents::{bus::MessageBus, manager::ManagerAgentConfig, messages::AgentEvent},
+    agents::{
+        bus::MessageBus, control::ControlAgentDeps, execution::ExecutionAgentDeps,
+        manager::ManagerAgentConfig, messages::AgentEvent, risk::RiskAgentConfig,
+        survival::SurvivalAgentDeps, watchdog::WatchdogConfig,
+    },
     backtest::{load_csv, BacktestEngine},
     config::Config,
     data::Timeframe,
     execution::risk::RiskLimits,
-    execution::{binance::BinanceFutures, Exchange, PaperExchange, PositionBook, RiskManager},
+    execution::{
+        binance::BinanceFutures, position::Position as PositionRecord, Exchange, PaperExchange,
+        PositionBook, RiskManager,
+    },
     feeds::{
         ExternalSnapshot, FearGreedClient, FundingClient, NewsClient, OnchainClient,
         SentimentClient,
@@ -216,15 +223,36 @@ async fn run_agents(cfg: Config) -> Result<()> {
     let policy = LearningPolicy::default();
     let feeds_cache: Arc<PlRwLock<HashMap<String, ExternalSnapshot>>> =
         Arc::new(PlRwLock::new(HashMap::new()));
+    let survival_state: Arc<PlRwLock<Option<crypto_scalper::agents::SurvivalState>>> =
+        Arc::new(PlRwLock::new(None));
 
     // --- Dashboard server ---
     let _metrics_handle = spawn_dashboard_server(
         DashboardState {
             metrics: Arc::clone(&metrics),
             policy: Some(policy.clone()),
+            survival: Arc::clone(&survival_state),
         },
         bind,
     );
+
+    // Forward SurvivalUpdated events to the dashboard's snapshot.
+    {
+        let bus_sub = bus.clone();
+        let survival_state = Arc::clone(&survival_state);
+        tokio::spawn(async move {
+            let mut rx = bus_sub.subscribe();
+            while let Ok(ev) = rx.recv().await {
+                match ev {
+                    crypto_scalper::agents::messages::AgentEvent::SurvivalUpdated(s) => {
+                        *survival_state.write() = Some(s);
+                    }
+                    crypto_scalper::agents::messages::AgentEvent::Shutdown => break,
+                    _ => {}
+                }
+            }
+        });
+    }
 
     // --- Spawn agents ---
     let _data = crypto_scalper::agents::data::spawn(
@@ -247,14 +275,21 @@ async fn run_agents(cfg: Config) -> Result<()> {
         cfg.pairs.symbols.clone(),
         60,
     );
-    let _signal =
-        crypto_scalper::agents::signal::spawn(bus.clone(), Arc::clone(&states), active.clone());
+    let _signal = crypto_scalper::agents::signal::spawn(
+        bus.clone(),
+        Arc::clone(&states),
+        active.clone(),
+        cfg.schedule.clone(),
+    );
     let _risk = crypto_scalper::agents::risk::spawn(
         bus.clone(),
         Arc::clone(&risk),
         policy.clone(),
-        cfg.strategy.min_ta_confidence,
-        cfg.llm.min_confidence,
+        RiskAgentConfig {
+            base_min_ta_threshold: cfg.strategy.min_ta_confidence,
+            base_min_llm_floor: cfg.llm.min_confidence,
+            ..RiskAgentConfig::default()
+        },
     );
     let _brain = crypto_scalper::agents::brain::spawn(
         bus.clone(),
@@ -280,12 +315,62 @@ async fn run_agents(cfg: Config) -> Result<()> {
         policy.clone(),
         Arc::clone(&feeds_cache),
     );
-    let _execution = crypto_scalper::agents::execution::spawn(
-        bus.clone(),
-        exchange,
-        Arc::clone(&risk),
-        Arc::clone(&book),
-    );
+    // --- Reconcile broker truth at startup (A3 + A4) ---
+    if cfg.mode.run_mode == "live" && !cfg.mode.dry_run {
+        for sym in &cfg.pairs.symbols {
+            if let Err(e) = exchange
+                .set_leverage(sym, cfg.risk.max_leverage as u8)
+                .await
+            {
+                warn!(symbol = %sym, error = %e, "set_leverage failed");
+            }
+        }
+        match exchange.fetch_equity_usd().await {
+            Ok(eq) if eq > 0.0 => {
+                info!(equity = eq, "startup: equity reconciled");
+                risk.set_equity(eq);
+            }
+            Ok(_) => {}
+            Err(e) => warn!(error = %e, "startup: fetch_equity_usd failed"),
+        }
+        match exchange.fetch_open_positions(&cfg.pairs.symbols).await {
+            Ok(positions) => {
+                let now = chrono::Utc::now();
+                let recovered: Vec<PositionRecord> = positions
+                    .into_iter()
+                    .map(|p| PositionRecord {
+                        client_id: format!("recovered-{}-{}", p.symbol, now.timestamp_millis()),
+                        symbol: p.symbol,
+                        side: p.side,
+                        size: p.size.abs(),
+                        entry_price: p.entry_price,
+                        stop_loss: 0.0,
+                        take_profit: 0.0,
+                        opened_at: now,
+                        trailing_activated: false,
+                        peak_price: p.mark_price,
+                        trough_price: p.mark_price,
+                    })
+                    .collect();
+                if !recovered.is_empty() {
+                    info!(
+                        count = recovered.len(),
+                        "startup: reconciled open positions"
+                    );
+                }
+                book.reconcile(recovered);
+            }
+            Err(e) => warn!(error = %e, "startup: fetch_open_positions failed"),
+        }
+    }
+
+    let _execution = crypto_scalper::agents::execution::spawn(ExecutionAgentDeps {
+        bus: bus.clone(),
+        exchange: exchange.clone(),
+        risk: Arc::clone(&risk),
+        book: Arc::clone(&book),
+        honor_survival: cfg.survival.enabled,
+    });
     let _monitor = crypto_scalper::agents::monitor::spawn(
         bus.clone(),
         Arc::clone(&metrics),
@@ -302,6 +387,27 @@ async fn run_agents(cfg: Config) -> Result<()> {
         },
         300,
     );
+
+    let _survival = crypto_scalper::agents::survival::spawn(SurvivalAgentDeps {
+        bus: bus.clone(),
+        cfg: cfg.survival.clone(),
+        exchange: exchange.clone(),
+        risk: Arc::clone(&risk),
+        initial_equity: cfg.risk.equity_usd,
+    });
+
+    let _control = crypto_scalper::agents::control::spawn(ControlAgentDeps {
+        bus: bus.clone(),
+        cfg: cfg.control.clone(),
+        telegram_token: cfg.monitoring.telegram_bot_token.clone(),
+        telegram_chat_id: cfg.monitoring.telegram_chat_id.clone(),
+        risk: Arc::clone(&risk),
+        book: Arc::clone(&book),
+        exchange: exchange.clone(),
+        control_file: Some(PathBuf::from("/tmp/aria.control")),
+    });
+
+    let _watchdog = crypto_scalper::agents::watchdog::spawn(bus.clone(), WatchdogConfig::default());
 
     let _ = telegram
         .send(&format!(

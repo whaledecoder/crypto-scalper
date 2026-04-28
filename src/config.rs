@@ -19,6 +19,10 @@ pub struct Config {
     pub feeds: Feeds,
     pub monitoring: Monitoring,
     pub backtest: Backtest,
+    #[serde(default)]
+    pub survival: SurvivalCfg,
+    #[serde(default)]
+    pub control: ControlCfg,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -185,6 +189,152 @@ pub struct Backtest {
     pub from_ts: String,
     #[serde(default)]
     pub to_ts: String,
+}
+
+/// "Trade for Life" survival mechanics. Defaults are calibrated for
+/// capital preservation: low risk per trade, hard equity floor, and
+/// aggressive cooldowns. The bot's job is to **stay alive**.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct SurvivalCfg {
+    /// Master switch. Default ON — disable only for unit tests / backtests.
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    /// Equity floor as a fraction of `risk.equity_usd`. When current
+    /// equity falls below `equity_usd * death_line_pct`, mode flips to
+    /// `Dead`: bot auto-flats every position and refuses to open new
+    /// ones until the operator manually unfreezes.
+    #[serde(default = "default_death_line")]
+    pub death_line_pct: f64,
+    /// Number of consecutive losses that triggers a 30-minute cooldown.
+    #[serde(default = "default_loss_streak_short")]
+    pub loss_streak_short: u32,
+    #[serde(default = "default_loss_streak_short_minutes")]
+    pub loss_streak_short_cooldown_min: u64,
+    /// Number of losses *within `loss_streak_long_window_min` minutes*
+    /// that triggers a 4-hour cooldown.
+    #[serde(default = "default_loss_streak_long")]
+    pub loss_streak_long: u32,
+    #[serde(default = "default_loss_streak_long_window_min")]
+    pub loss_streak_long_window_min: u64,
+    #[serde(default = "default_loss_streak_long_cooldown_min")]
+    pub loss_streak_long_cooldown_min: u64,
+    /// Daily loss count that triggers a 24-hour cooldown.
+    #[serde(default = "default_daily_loss_count")]
+    pub daily_loss_count: u32,
+    /// Auto-flat threshold (% of peak equity) — if drawdown crosses this
+    /// inside the rolling window, every open position is closed.
+    #[serde(default = "default_auto_flat_pct")]
+    pub auto_flat_drawdown_pct: f64,
+    /// Refresh cadence for the SurvivalAgent (seconds).
+    #[serde(default = "default_survival_refresh")]
+    pub refresh_secs: u64,
+    /// Equity reconciliation cadence (seconds). Set to 0 to disable.
+    #[serde(default = "default_equity_refresh")]
+    pub equity_refresh_secs: u64,
+    /// Volatility multiplier (vs 24h ATR moving average). Above this
+    /// multiplier, sizes halve. Above 2× this multiplier, signals are skipped.
+    #[serde(default = "default_vol_spike_mult")]
+    pub vol_spike_mult: f64,
+    /// News blackout — net news score below this triggers a freeze.
+    #[serde(default = "default_news_panic")]
+    pub news_panic_threshold: f64,
+    /// News blackout — net news score above this triggers half-size mode
+    /// (avoid FOMO chasing tops).
+    #[serde(default = "default_news_euphoria")]
+    pub news_euphoria_threshold: f64,
+    /// Daily PnL ratchet — once today's gain reaches this %, lock half
+    /// the gain (bot stops trading until ratchet eases).
+    #[serde(default = "default_daily_ratchet_pct")]
+    pub daily_pnl_ratchet_pct: f64,
+}
+
+fn default_true() -> bool {
+    true
+}
+fn default_death_line() -> f64 {
+    0.70
+}
+fn default_loss_streak_short() -> u32 {
+    3
+}
+fn default_loss_streak_short_minutes() -> u64 {
+    30
+}
+fn default_loss_streak_long() -> u32 {
+    5
+}
+fn default_loss_streak_long_window_min() -> u64 {
+    60
+}
+fn default_loss_streak_long_cooldown_min() -> u64 {
+    240
+}
+fn default_daily_loss_count() -> u32 {
+    10
+}
+fn default_auto_flat_pct() -> f64 {
+    8.0
+}
+fn default_survival_refresh() -> u64 {
+    15
+}
+fn default_equity_refresh() -> u64 {
+    60
+}
+fn default_vol_spike_mult() -> f64 {
+    2.0
+}
+fn default_news_panic() -> f64 {
+    -0.6
+}
+fn default_news_euphoria() -> f64 {
+    0.8
+}
+fn default_daily_ratchet_pct() -> f64 {
+    2.0
+}
+
+impl Default for SurvivalCfg {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            death_line_pct: default_death_line(),
+            loss_streak_short: default_loss_streak_short(),
+            loss_streak_short_cooldown_min: default_loss_streak_short_minutes(),
+            loss_streak_long: default_loss_streak_long(),
+            loss_streak_long_window_min: default_loss_streak_long_window_min(),
+            loss_streak_long_cooldown_min: default_loss_streak_long_cooldown_min(),
+            daily_loss_count: default_daily_loss_count(),
+            auto_flat_drawdown_pct: default_auto_flat_pct(),
+            refresh_secs: default_survival_refresh(),
+            equity_refresh_secs: default_equity_refresh(),
+            vol_spike_mult: default_vol_spike_mult(),
+            news_panic_threshold: default_news_panic(),
+            news_euphoria_threshold: default_news_euphoria(),
+            daily_pnl_ratchet_pct: default_daily_ratchet_pct(),
+        }
+    }
+}
+
+/// External-control surface (Telegram bot, CLI). Disabled by default —
+/// the bot must be safe to run unattended without exposing a remote
+/// command interface.
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
+pub struct ControlCfg {
+    /// Master switch for the Telegram command panel.
+    #[serde(default)]
+    pub telegram_commands_enabled: bool,
+    /// Comma-separated list of Telegram user IDs allowed to issue
+    /// commands. Empty = lock down to chat owner only.
+    #[serde(default)]
+    pub allowed_user_ids: Vec<i64>,
+    /// Poll interval for Telegram getUpdates (long-poll); seconds.
+    #[serde(default = "default_telegram_poll")]
+    pub poll_secs: u64,
+}
+
+fn default_telegram_poll() -> u64 {
+    3
 }
 
 impl Config {

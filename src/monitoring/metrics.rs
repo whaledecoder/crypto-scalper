@@ -1,7 +1,8 @@
 //! HTTP metrics/dashboard endpoint (JSON).
 
+use crate::agents::messages::SurvivalState;
 use crate::learning::{LearningPolicy, Lesson};
-use axum::{extract::State, routing::get, Json, Router};
+use axum::{extract::State, http::StatusCode, response::IntoResponse, routing::get, Json, Router};
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
@@ -57,12 +58,17 @@ impl MetricsState {
 pub struct DashboardState {
     pub metrics: Arc<MetricsState>,
     pub policy: Option<LearningPolicy>,
+    /// Latest `SurvivalState` published by the SurvivalAgent.
+    /// Wrapped in `Arc<RwLock<…>>` so the agent can keep updating it
+    /// without taking ownership of the dashboard server.
+    pub survival: Arc<RwLock<Option<SurvivalState>>>,
 }
 
 #[derive(Debug, Clone, Serialize)]
 struct DashboardResponse {
     metrics: MetricsSnapshot,
     lessons: Vec<Lesson>,
+    survival: Option<SurvivalState>,
 }
 
 pub fn spawn_metrics_server(state: Arc<MetricsState>, bind: SocketAddr) -> JoinHandle<()> {
@@ -70,6 +76,7 @@ pub fn spawn_metrics_server(state: Arc<MetricsState>, bind: SocketAddr) -> JoinH
         DashboardState {
             metrics: state,
             policy: None,
+            survival: Arc::new(RwLock::new(None)),
         },
         bind,
     )
@@ -81,6 +88,7 @@ pub fn spawn_dashboard_server(state: DashboardState, bind: SocketAddr) -> JoinHa
         .route("/healthz", get(|| async { "ok" }))
         .route("/metrics", get(metrics_handler))
         .route("/lessons", get(lessons_handler))
+        .route("/survival", get(survival_handler))
         .route("/dashboard", get(dashboard_handler))
         .with_state(state);
     tokio::spawn(async move {
@@ -99,7 +107,14 @@ pub fn spawn_dashboard_server(state: DashboardState, bind: SocketAddr) -> JoinHa
 }
 
 async fn root_handler() -> &'static str {
-    "ARIA metrics — see /metrics, /lessons, /dashboard, /healthz"
+    "ARIA metrics — see /metrics, /lessons, /survival, /dashboard, /healthz"
+}
+
+async fn survival_handler(State(state): State<DashboardState>) -> impl IntoResponse {
+    match state.survival.read().clone() {
+        Some(s) => Json(s).into_response(),
+        None => (StatusCode::NOT_FOUND, "survival state not yet computed").into_response(),
+    }
 }
 
 async fn metrics_handler(State(state): State<DashboardState>) -> Json<MetricsSnapshot> {
@@ -124,5 +139,6 @@ async fn dashboard_handler(State(state): State<DashboardState>) -> Json<Dashboar
             .as_ref()
             .map(|p| p.active_lessons())
             .unwrap_or_default(),
+        survival: state.survival.read().clone(),
     })
 }

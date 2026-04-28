@@ -3,8 +3,9 @@
 //! This is a minimal, defensive implementation: it supports `POST /fapi/v1/order`
 //! for market + limit and `DELETE /fapi/v1/order` for cancellation.
 
+use crate::data::Side;
 use crate::errors::{Result, ScalperError};
-use crate::execution::exchange::{Exchange, OrderAck};
+use crate::execution::exchange::{Exchange, OrderAck, PositionSnapshot};
 use crate::execution::orders::{OrderRequest, OrderType};
 use hmac::{Hmac, Mac};
 use reqwest::Client;
@@ -82,14 +83,36 @@ impl Exchange for BinanceFutures {
                 ("symbol".to_string(), req.symbol.clone()),
                 ("side".to_string(), side.to_string()),
                 ("type".to_string(), order_type.to_string()),
-                ("quantity".to_string(), format!("{:.6}", req.size)),
                 ("newClientOrderId".to_string(), req.client_id.clone()),
                 ("recvWindow".to_string(), self.recv_window_ms.to_string()),
                 ("timestamp".to_string(), ts.to_string()),
             ];
+            // For protective orders we use closePosition=true so we
+            // don't have to repeat the size — Binance will close the
+            // entire open position on trigger. For everything else we
+            // pass quantity normally.
+            let is_protective =
+                matches!(req.order_type, OrderType::StopLoss | OrderType::TakeProfit);
+            if is_protective {
+                params.push(("closePosition".to_string(), "true".to_string()));
+            } else {
+                params.push(("quantity".to_string(), format!("{:.6}", req.size)));
+            }
+            if req.reduce_only && !is_protective {
+                params.push(("reduceOnly".to_string(), "true".to_string()));
+            }
+            if let Some(stop_price) = req.stop_price {
+                if is_protective {
+                    params.push(("stopPrice".to_string(), format!("{:.2}", stop_price)));
+                    params.push(("workingType".to_string(), "MARK_PRICE".to_string()));
+                    params.push(("priceProtect".to_string(), "true".to_string()));
+                }
+            }
             if let Some(p) = req.price {
-                params.push(("price".to_string(), format!("{:.2}", p)));
-                params.push(("timeInForce".to_string(), "GTC".to_string()));
+                if matches!(req.order_type, OrderType::Limit) {
+                    params.push(("price".to_string(), format!("{:.2}", p)));
+                    params.push(("timeInForce".to_string(), "GTC".to_string()));
+                }
             }
 
             let qs = encode_query(&params);
@@ -175,6 +198,214 @@ impl Exchange for BinanceFutures {
                 )));
             }
             Ok(())
+        })
+    }
+
+    fn cancel_all<'a>(
+        &'a self,
+        symbol: &'a str,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send + 'a>> {
+        Box::pin(async move {
+            let ts = self.timestamp_ms();
+            let params = vec![
+                ("symbol".to_string(), symbol.to_string()),
+                ("timestamp".to_string(), ts.to_string()),
+                ("recvWindow".to_string(), self.recv_window_ms.to_string()),
+            ];
+            let qs = encode_query(&params);
+            let sig = self.sign(&qs)?;
+            let url = format!(
+                "{}/fapi/v1/allOpenOrders?{qs}&signature={sig}",
+                self.base_url.trim_end_matches('/')
+            );
+            let resp = self
+                .client
+                .delete(&url)
+                .header("X-MBX-APIKEY", &self.api_key)
+                .send()
+                .await?;
+            if !resp.status().is_success() {
+                let status = resp.status();
+                let body = resp.text().await.unwrap_or_default();
+                return Err(ScalperError::Exchange(format!(
+                    "cancel_all http {status}: {body}"
+                )));
+            }
+            Ok(())
+        })
+    }
+
+    fn set_leverage<'a>(
+        &'a self,
+        symbol: &'a str,
+        leverage: u8,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send + 'a>> {
+        Box::pin(async move {
+            let ts = self.timestamp_ms();
+            let params = vec![
+                ("symbol".to_string(), symbol.to_string()),
+                ("leverage".to_string(), leverage.to_string()),
+                ("timestamp".to_string(), ts.to_string()),
+                ("recvWindow".to_string(), self.recv_window_ms.to_string()),
+            ];
+            let qs = encode_query(&params);
+            let sig = self.sign(&qs)?;
+            let url = format!(
+                "{}/fapi/v1/leverage?{qs}&signature={sig}",
+                self.base_url.trim_end_matches('/')
+            );
+            let resp = self
+                .client
+                .post(&url)
+                .header("X-MBX-APIKEY", &self.api_key)
+                .send()
+                .await?;
+            if !resp.status().is_success() {
+                let status = resp.status();
+                let body = resp.text().await.unwrap_or_default();
+                return Err(ScalperError::Exchange(format!(
+                    "set_leverage http {status}: {body}"
+                )));
+            }
+            Ok(())
+        })
+    }
+
+    fn fetch_equity_usd<'a>(
+        &'a self,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<f64>> + Send + 'a>> {
+        Box::pin(async move {
+            let ts = self.timestamp_ms();
+            let params = vec![
+                ("timestamp".to_string(), ts.to_string()),
+                ("recvWindow".to_string(), self.recv_window_ms.to_string()),
+            ];
+            let qs = encode_query(&params);
+            let sig = self.sign(&qs)?;
+            let url = format!(
+                "{}/fapi/v2/balance?{qs}&signature={sig}",
+                self.base_url.trim_end_matches('/')
+            );
+            let resp = self
+                .client
+                .get(&url)
+                .header("X-MBX-APIKEY", &self.api_key)
+                .send()
+                .await?;
+            if !resp.status().is_success() {
+                let status = resp.status();
+                let body = resp.text().await.unwrap_or_default();
+                return Err(ScalperError::Exchange(format!(
+                    "fetch_equity_usd http {status}: {body}"
+                )));
+            }
+            let body: serde_json::Value = resp.json().await?;
+            // Sum margin balance across USDT/BUSD/USDC entries.
+            let mut total = 0.0_f64;
+            if let Some(arr) = body.as_array() {
+                for entry in arr {
+                    let asset = entry.get("asset").and_then(|v| v.as_str()).unwrap_or("");
+                    if asset == "USDT" || asset == "BUSD" || asset == "USDC" {
+                        let bal: f64 = entry
+                            .get("balance")
+                            .and_then(|v| v.as_str())
+                            .and_then(|s| s.parse().ok())
+                            .unwrap_or(0.0);
+                        let upnl: f64 = entry
+                            .get("crossUnPnl")
+                            .and_then(|v| v.as_str())
+                            .and_then(|s| s.parse().ok())
+                            .unwrap_or(0.0);
+                        total += bal + upnl;
+                    }
+                }
+            }
+            Ok(total)
+        })
+    }
+
+    fn fetch_open_positions<'a>(
+        &'a self,
+        symbols: &'a [String],
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<Vec<PositionSnapshot>>> + Send + 'a>,
+    > {
+        Box::pin(async move {
+            let ts = self.timestamp_ms();
+            let params = vec![
+                ("timestamp".to_string(), ts.to_string()),
+                ("recvWindow".to_string(), self.recv_window_ms.to_string()),
+            ];
+            let qs = encode_query(&params);
+            let sig = self.sign(&qs)?;
+            let url = format!(
+                "{}/fapi/v2/positionRisk?{qs}&signature={sig}",
+                self.base_url.trim_end_matches('/')
+            );
+            let resp = self
+                .client
+                .get(&url)
+                .header("X-MBX-APIKEY", &self.api_key)
+                .send()
+                .await?;
+            if !resp.status().is_success() {
+                let status = resp.status();
+                let body = resp.text().await.unwrap_or_default();
+                return Err(ScalperError::Exchange(format!(
+                    "fetch_open_positions http {status}: {body}"
+                )));
+            }
+            let body: serde_json::Value = resp.json().await?;
+            let mut out = Vec::new();
+            let symbol_filter: std::collections::HashSet<&str> =
+                symbols.iter().map(|s| s.as_str()).collect();
+            if let Some(arr) = body.as_array() {
+                for p in arr {
+                    let symbol = p.get("symbol").and_then(|v| v.as_str()).unwrap_or("");
+                    if !symbols.is_empty() && !symbol_filter.contains(symbol) {
+                        continue;
+                    }
+                    let amt: f64 = p
+                        .get("positionAmt")
+                        .and_then(|v| v.as_str())
+                        .and_then(|s| s.parse().ok())
+                        .unwrap_or(0.0);
+                    if amt.abs() < 1e-9 {
+                        continue;
+                    }
+                    let entry: f64 = p
+                        .get("entryPrice")
+                        .and_then(|v| v.as_str())
+                        .and_then(|s| s.parse().ok())
+                        .unwrap_or(0.0);
+                    let mark: f64 = p
+                        .get("markPrice")
+                        .and_then(|v| v.as_str())
+                        .and_then(|s| s.parse().ok())
+                        .unwrap_or(0.0);
+                    let upnl: f64 = p
+                        .get("unRealizedProfit")
+                        .and_then(|v| v.as_str())
+                        .and_then(|s| s.parse().ok())
+                        .unwrap_or(0.0);
+                    let leverage: u8 = p
+                        .get("leverage")
+                        .and_then(|v| v.as_str())
+                        .and_then(|s| s.parse().ok())
+                        .unwrap_or(1);
+                    let side = if amt > 0.0 { Side::Long } else { Side::Short };
+                    out.push(PositionSnapshot {
+                        symbol: symbol.to_string(),
+                        side,
+                        size: amt.abs(),
+                        entry_price: entry,
+                        mark_price: mark,
+                        unrealized_pnl: upnl,
+                        leverage,
+                    });
+                }
+            }
+            Ok(out)
         })
     }
 }

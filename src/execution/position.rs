@@ -69,6 +69,27 @@ impl PositionBook {
         self.inner.lock().values().cloned().collect()
     }
 
+    /// Snapshot of every open position. Alias for `all()` — used in
+    /// `flat-all` flows where the call site wants iteration semantics.
+    pub fn snapshot(&self) -> Vec<Position> {
+        self.all()
+    }
+
+    pub fn close_by_id(&self, client_id: &str) -> Option<Position> {
+        self.close(client_id)
+    }
+
+    /// Replace the in-memory book with the given list of positions.
+    /// Used by `ExecutionAgent` at startup to reconcile the in-memory
+    /// state against what the exchange actually holds.
+    pub fn reconcile(&self, positions: Vec<Position>) {
+        let mut book = self.inner.lock();
+        book.clear();
+        for p in positions {
+            book.insert(p.client_id.clone(), p);
+        }
+    }
+
     pub fn update_price(&self, symbol: &str, price: f64) {
         for p in self.inner.lock().values_mut() {
             if p.symbol != symbol {

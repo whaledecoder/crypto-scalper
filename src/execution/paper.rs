@@ -1,7 +1,7 @@
 //! Paper exchange — instant fills at the requested price, no network.
 
 use crate::errors::Result;
-use crate::execution::exchange::{Exchange, OrderAck};
+use crate::execution::exchange::{Exchange, OrderAck, PositionSnapshot};
 use crate::execution::orders::OrderRequest;
 use chrono::Utc;
 use parking_lot::Mutex;
@@ -16,6 +16,9 @@ pub struct OpenPaperOrder {
 pub struct PaperExchange {
     fee_bps: f64,
     orders: Mutex<HashMap<String, OpenPaperOrder>>,
+    /// Synthetic balance the paper exchange "holds". Updated by callers
+    /// (RiskAgent / SurvivalAgent) so they can simulate equity drift.
+    equity_usd: Mutex<f64>,
 }
 
 impl PaperExchange {
@@ -23,11 +26,16 @@ impl PaperExchange {
         Self {
             fee_bps,
             orders: Mutex::new(HashMap::new()),
+            equity_usd: Mutex::new(0.0),
         }
     }
 
     pub fn open_orders(&self) -> Vec<OpenPaperOrder> {
         self.orders.lock().values().cloned().collect()
+    }
+
+    pub fn set_equity(&self, equity: f64) {
+        *self.equity_usd.lock() = equity;
     }
 }
 
@@ -72,5 +80,40 @@ impl Exchange for PaperExchange {
             self.orders.lock().remove(client_id);
             Ok(())
         })
+    }
+
+    fn cancel_all<'a>(
+        &'a self,
+        symbol: &'a str,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send + 'a>> {
+        Box::pin(async move {
+            self.orders.lock().retain(|_, o| o.req.symbol != symbol);
+            Ok(())
+        })
+    }
+
+    fn set_leverage<'a>(
+        &'a self,
+        _symbol: &'a str,
+        _leverage: u8,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send + 'a>> {
+        Box::pin(async move { Ok(()) })
+    }
+
+    fn fetch_equity_usd<'a>(
+        &'a self,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<f64>> + Send + 'a>> {
+        Box::pin(async move { Ok(*self.equity_usd.lock()) })
+    }
+
+    fn fetch_open_positions<'a>(
+        &'a self,
+        _symbols: &'a [String],
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<Vec<PositionSnapshot>>> + Send + 'a>,
+    > {
+        // Paper exchange has no broker-side positions — the in-memory
+        // PositionBook is the source of truth.
+        Box::pin(async move { Ok(Vec::new()) })
     }
 }

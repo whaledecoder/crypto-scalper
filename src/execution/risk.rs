@@ -14,6 +14,12 @@ pub struct RiskSnapshot {
     pub drawdown_pct: f64,
     pub tripped: bool,
     pub trip_reason: Option<String>,
+    /// True iff trading is paused (either tripped, frozen by SurvivalAgent,
+    /// or both). Use `is_blocked()` rather than checking individual flags.
+    #[serde(default)]
+    pub frozen: bool,
+    #[serde(default)]
+    pub freeze_reason: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -35,6 +41,16 @@ struct Inner {
     realized_pnl_today: f64,
     tripped: bool,
     trip_reason: Option<String>,
+    frozen: bool,
+    freeze_reason: Option<String>,
+    /// Multiplier applied on top of `risk_per_trade_pct` when sizing.
+    /// SurvivalAgent uses this to scale risk down (or up) based on
+    /// the current `survive_score`. Default = 1.0.
+    size_multiplier: f64,
+    /// Initial equity captured at boot. Used as the "death line" baseline:
+    /// when current equity drops below `initial_equity * death_line_pct`
+    /// the SurvivalAgent freezes everything.
+    initial_equity: f64,
 }
 
 #[derive(Clone)]
@@ -53,8 +69,73 @@ impl RiskManager {
                 realized_pnl_today: 0.0,
                 tripped: false,
                 trip_reason: None,
+                frozen: false,
+                freeze_reason: None,
+                size_multiplier: 1.0,
+                initial_equity: equity,
             })),
         }
+    }
+
+    /// Replace the in-memory equity with a fresh value (e.g. fetched
+    /// from the exchange). Adjusts `peak_equity` if the new value is
+    /// higher. Resets `tripped` if equity recovers above the limits.
+    pub fn set_equity(&self, equity: f64) {
+        let mut i = self.inner.lock();
+        i.equity = equity;
+        if equity > i.peak_equity {
+            i.peak_equity = equity;
+        }
+    }
+
+    pub fn equity(&self) -> f64 {
+        self.inner.lock().equity
+    }
+
+    pub fn initial_equity(&self) -> f64 {
+        self.inner.lock().initial_equity
+    }
+
+    pub fn open_positions(&self) -> u32 {
+        self.inner.lock().open_positions
+    }
+
+    pub fn realized_pnl_today(&self) -> f64 {
+        self.inner.lock().realized_pnl_today
+    }
+
+    /// SurvivalAgent calls this to scale all future trade sizing
+    /// (multiplier ∈ [0.0, 2.0] with 0.0 meaning "do not size at all").
+    pub fn set_size_multiplier(&self, m: f64) {
+        let mut i = self.inner.lock();
+        i.size_multiplier = m.clamp(0.0, 2.0);
+    }
+
+    pub fn size_multiplier(&self) -> f64 {
+        self.inner.lock().size_multiplier
+    }
+
+    /// Pause new entries without tripping the daily-loss circuit.
+    /// Used by SurvivalAgent / Telegram /freeze command.
+    pub fn freeze(&self, reason: impl Into<String>) {
+        let mut i = self.inner.lock();
+        i.frozen = true;
+        i.freeze_reason = Some(reason.into());
+    }
+
+    pub fn unfreeze(&self) {
+        let mut i = self.inner.lock();
+        i.frozen = false;
+        i.freeze_reason = None;
+    }
+
+    pub fn is_frozen(&self) -> bool {
+        self.inner.lock().frozen
+    }
+
+    pub fn is_blocked(&self) -> bool {
+        let i = self.inner.lock();
+        i.tripped || i.frozen
     }
 
     pub fn snapshot(&self) -> RiskSnapshot {
@@ -78,6 +159,8 @@ impl RiskManager {
             drawdown_pct: dd,
             tripped: i.tripped,
             trip_reason: i.trip_reason.clone(),
+            frozen: i.frozen,
+            freeze_reason: i.freeze_reason.clone(),
         }
     }
 
@@ -92,6 +175,12 @@ impl RiskManager {
             return Err(format!(
                 "circuit tripped: {}",
                 i.trip_reason.clone().unwrap_or_default()
+            ));
+        }
+        if i.frozen {
+            return Err(format!(
+                "frozen by survival/operator: {}",
+                i.freeze_reason.clone().unwrap_or_default()
             ));
         }
         if i.open_positions >= i.limits.max_open_positions {
@@ -117,16 +206,19 @@ impl RiskManager {
     }
 
     /// Calculate qty so that (entry - sl).abs() * qty == equity * risk%.
+    /// The result is multiplied by the SurvivalAgent-controlled
+    /// `size_multiplier`, so when the bot is in a low-survive-score
+    /// regime sizes shrink automatically.
     pub fn calculate_size(&self, entry: f64, stop_loss: f64) -> f64 {
         let i = self.inner.lock();
-        let risk_amount = i.equity * i.limits.risk_per_trade_pct / 100.0;
+        let risk_amount = i.equity * i.limits.risk_per_trade_pct / 100.0 * i.size_multiplier;
         let risk_per_unit = (entry - stop_loss).abs();
         if risk_per_unit <= 0.0 {
             return 0.0;
         }
         let raw = risk_amount / risk_per_unit;
         let leverage_cap = i.equity * i.limits.max_leverage as f64 / entry.max(1e-9);
-        raw.min(leverage_cap)
+        raw.min(leverage_cap).max(0.0)
     }
 
     pub fn on_position_opened(&self) {

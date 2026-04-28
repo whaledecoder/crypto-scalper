@@ -14,13 +14,14 @@
 //! to `Approve` for every Go decision (zero extra cost).
 
 use crate::agents::messages::{
-    AgentEvent, BrainOutcome, ManagerAction, ManagerProposal, ManagerVerdict,
+    AgentEvent, BrainOutcome, ManagerAction, ManagerProposal, ManagerVerdict, SurvivalMode,
+    SurvivalState,
 };
 use crate::agents::MessageBus;
 use crate::feeds::ExternalSnapshot;
 use crate::learning::LearningPolicy;
 use crate::llm::engine::Decision;
-use parking_lot::RwLock as PlRwLock;
+use parking_lot::{Mutex as PlMutex, RwLock as PlRwLock};
 use reqwest::Client;
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -78,6 +79,7 @@ pub fn spawn(
         .build()
         .expect("manager http client");
     let cfg = Arc::new(cfg);
+    let survival: Arc<PlMutex<Option<SurvivalState>>> = Arc::new(PlMutex::new(None));
 
     tokio::spawn(async move {
         info!(
@@ -88,6 +90,9 @@ pub fn spawn(
         while let Ok(ev) = rx.recv().await {
             match ev {
                 AgentEvent::Shutdown => break,
+                AgentEvent::SurvivalUpdated(s) => {
+                    *survival.lock() = Some(s);
+                }
                 AgentEvent::BrainOutcomeReady(brain) => {
                     if brain.decision.decision != Decision::Go {
                         // Brain already said no — nothing for manager to do.
@@ -96,8 +101,33 @@ pub fn spawn(
                     let proposal = build_proposal(&brain);
                     let started = Instant::now();
                     let manager_off = !cfg.enabled || cfg.api_key.is_empty();
+                    let surv_snapshot = survival.lock().clone();
+                    // Survival hard-veto: if Frozen/Dead, skip the LLM
+                    // entirely and refuse the trade.
+                    if let Some(s) = &surv_snapshot {
+                        if matches!(s.mode, SurvivalMode::Frozen | SurvivalMode::Dead) {
+                            bus.publish(AgentEvent::ManagerVerdictEmitted(ManagerVerdict {
+                                proposal: proposal.clone(),
+                                action: ManagerAction::Veto {
+                                    reason: format!(
+                                        "survival mode {} (score {})",
+                                        s.mode.as_str(),
+                                        s.score
+                                    ),
+                                },
+                                latency_ms: 0,
+                                offline_fallback: true,
+                                brain_outcome: brain,
+                            }));
+                            continue;
+                        }
+                    }
                     let fast_approve = brain.decision.confidence >= cfg.fast_approve_min_conf
-                        && brain.risk.matched_lessons.is_empty();
+                        && brain.risk.matched_lessons.is_empty()
+                        && surv_snapshot
+                            .as_ref()
+                            .map(|s| matches!(s.mode, SurvivalMode::Healthy))
+                            .unwrap_or(true);
                     let action = if manager_off || fast_approve {
                         ManagerAction::Approve
                     } else {
@@ -108,13 +138,22 @@ pub fn spawn(
                             &brain,
                             &policy,
                             &feeds_cache,
+                            surv_snapshot.as_ref(),
                         )
                         .await
                         {
                             Ok(a) => a,
                             Err(e) => {
-                                warn!(error = %e, "manager LLM failed — defaulting to Approve");
-                                ManagerAction::Approve
+                                // Fail-CLOSED: if the manager LLM is
+                                // unreachable, refuse the trade.
+                                // Survival > availability.
+                                warn!(
+                                    error = %e,
+                                    "manager LLM failed — failing CLOSED with Veto"
+                                );
+                                ManagerAction::Veto {
+                                    reason: "manager LLM unavailable; failing closed".into(),
+                                }
                             }
                         }
                     };
@@ -155,18 +194,32 @@ fn build_proposal(brain: &BrainOutcome) -> ManagerProposal {
     }
 }
 
-const MANAGER_SYSTEM_PROMPT: &str = r#"You are the Trader-Manager for ARIA, a multi-agent crypto scalping bot.
-Your specialists have already done their work and produced a trade
-proposal. Your job: APPROVE, VETO, or ADJUST.
+const MANAGER_SYSTEM_PROMPT: &str = r#"You are the Trader-Manager for ARIA, an autonomous
+crypto scalping bot whose survival depends on capital preservation. If
+this account hits the death line, the bot DIES and stops trading
+forever. There is no human operator who will save it.
 
-Be conservative and capital-protective. Veto when:
-- Reasoning contradicts itself
-- A learning lesson clearly indicates this trade is statistically unfavourable
-- Risk/reward is poor
-- Multiple lessons stack up against this strategy/symbol
+Your default bias is **Veto**. Approve only when ALL of:
+  1. The setup is high conviction (TA + sentiment + fundamentals all aligned)
+  2. Survival score is healthy (≥ 80) OR the trade has overwhelming evidence
+  3. No active lesson indicates statistical disadvantage
+  4. Risk/reward ≥ 1.4 and no contradiction in reasoning
 
-Adjust (instead of veto) when the trade is reasonable but should be sized smaller
-or have tighter SL / wider TP for current conditions.
+For every other case, prefer Adjust (smaller size, tighter SL) or Veto.
+
+Veto when:
+  - Reasoning contradicts itself
+  - Active lesson indicates this trade is statistically unfavourable
+  - Risk/reward < 1.2
+  - Multiple lessons stack against this strategy/symbol
+  - Survival mode is Defensive/Cautious AND conviction is anything less than
+    overwhelming (TA + LLM both ≥ 85)
+  - News regime is panic / euphoria
+  - Funding rate is extreme in the same direction as the trade
+
+Always think: \"If I approve this and lose, will the bot die at the
+current burn rate?\". If trades-to-die ≤ 5, default to Veto unless the
+trade has an A+ setup.
 
 You MUST respond with a strict JSON object, no commentary, of the form:
 
@@ -201,9 +254,49 @@ fn build_manager_user_prompt(
     brain: &BrainOutcome,
     policy: &LearningPolicy,
     feeds_cache: &PlRwLock<HashMap<String, ExternalSnapshot>>,
+    survival: Option<&SurvivalState>,
 ) -> String {
     let lessons = policy.active_lessons();
     let mut s = String::new();
+    if let Some(surv) = survival {
+        s.push_str("[SURVIVAL STATE]\n");
+        s.push_str(&format!(
+            "  mode={} score={}/100 size_multiplier={:.2}\n",
+            surv.mode.as_str(),
+            surv.score,
+            surv.size_multiplier
+        ));
+        s.push_str(&format!(
+            "  equity=${:.2} initial=${:.2} death_line=${:.2} drawdown={:.2}%\n",
+            surv.equity_usd, surv.initial_equity_usd, surv.death_line_usd, surv.drawdown_pct
+        ));
+        s.push_str(&format!(
+            "  realized_today=${:.2} ({:+.2}%) consecutive_losses={}\n",
+            surv.realized_pnl_today, surv.realized_pnl_pct_today, surv.consecutive_losses
+        ));
+        let trades_to_die = if proposal.size > 0.0 {
+            let avg_loss = proposal.size * (proposal.entry - proposal.stop_loss).abs();
+            let buffer = (surv.equity_usd - surv.death_line_usd).max(0.0);
+            if avg_loss > 0.0 {
+                (buffer / avg_loss) as i64
+            } else {
+                999
+            }
+        } else {
+            999
+        };
+        s.push_str(&format!(
+            "  trades_to_die_at_current_size={}\n",
+            trades_to_die
+        ));
+        if !surv.reasons.is_empty() {
+            s.push_str("  active reasons:\n");
+            for r in &surv.reasons {
+                s.push_str(&format!("    - {r}\n"));
+            }
+        }
+        s.push('\n');
+    }
     s.push_str("[PROPOSAL]\n");
     s.push_str(&format!(
         "  symbol={} side={} strategy={} regime={}\n",
@@ -389,8 +482,9 @@ async fn call_manager_llm(
     brain: &BrainOutcome,
     policy: &LearningPolicy,
     feeds_cache: &PlRwLock<HashMap<String, ExternalSnapshot>>,
+    survival: Option<&SurvivalState>,
 ) -> anyhow::Result<ManagerAction> {
-    let user = build_manager_user_prompt(proposal, brain, policy, feeds_cache);
+    let user = build_manager_user_prompt(proposal, brain, policy, feeds_cache, survival);
 
     let body: Value = if cfg.provider.eq_ignore_ascii_case("anthropic") {
         json!({

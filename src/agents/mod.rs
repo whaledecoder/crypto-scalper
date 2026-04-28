@@ -15,6 +15,7 @@
 
 pub mod brain;
 pub mod bus;
+pub mod control;
 pub mod data;
 pub mod execution;
 pub mod feeds;
@@ -24,9 +25,11 @@ pub mod messages;
 pub mod monitor;
 pub mod risk;
 pub mod signal;
+pub mod survival;
+pub mod watchdog;
 
 pub use bus::MessageBus;
 pub use messages::{
-    AgentEvent, AgentId, BrainOutcome, FeedsSnapshotMsg, ManagerAction, ManagerProposal,
-    ManagerVerdict, RiskOutcome, RiskVerdictMsg,
+    AgentEvent, AgentId, BrainOutcome, ControlCommand, FeedsSnapshotMsg, ManagerAction,
+    ManagerProposal, ManagerVerdict, RiskOutcome, RiskVerdictMsg, SurvivalMode, SurvivalState,
 };

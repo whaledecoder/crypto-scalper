@@ -21,6 +21,8 @@ pub enum AgentId {
     Manager,
     Execution,
     Monitor,
+    Survival,
+    Control,
 }
 
 impl AgentId {
@@ -35,6 +37,8 @@ impl AgentId {
             Self::Manager => "manager",
             Self::Execution => "execution",
             Self::Monitor => "monitor",
+            Self::Survival => "survival",
+            Self::Control => "control",
         }
     }
 }
@@ -90,8 +94,88 @@ pub enum AgentEvent {
     },
     /// Heartbeat for liveness monitoring.
     Heartbeat { from: AgentId, ts: DateTime<Utc> },
+    /// `SurvivalAgent` published a new survival state. All downstream
+    /// agents (manager prompt, risk sizing, execution gate) consume this
+    /// to decide how aggressive to be.
+    SurvivalUpdated(SurvivalState),
+    /// Equity reconciled from the exchange (or paper synthetic).
+    EquityReconciled { equity_usd: f64, ts: DateTime<Utc> },
+    /// External operator command (Telegram, CLI). Routed by the
+    /// `ControlAgent` and consumed by the relevant downstream agent.
+    ControlCommand(ControlCommand),
     /// Graceful shutdown notice.
     Shutdown,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum ControlCommand {
+    /// Freeze new entries (idempotent).
+    Freeze { reason: String },
+    /// Resume trading after a freeze.
+    Unfreeze,
+    /// Close every open position at market right now and freeze.
+    FlatAll { reason: String },
+    /// Reset daily pnl counters (cron 00:00 UTC). Internal use.
+    ResetDaily,
+    /// External request to publish a fresh /status snapshot to Telegram.
+    StatusRequest,
+}
+
+/// SurvivalAgent's verdict, broadcast continuously. Other agents
+/// derive their behaviour from this:
+///
+/// - `RiskAgent`        — uses `size_multiplier`
+/// - `ExecutionAgent`   — refuses when `mode == Frozen` or `Dead`
+/// - `ManagerAgent`     — prompt embeds score + reasons
+/// - `MonitorAgent`     — exposes via `/survival` + Telegram
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SurvivalState {
+    /// 0 = death imminent, 100 = peak fitness.
+    pub score: u8,
+    pub mode: SurvivalMode,
+    pub equity_usd: f64,
+    pub initial_equity_usd: f64,
+    pub death_line_usd: f64,
+    pub peak_equity_usd: f64,
+    pub realized_pnl_today: f64,
+    pub realized_pnl_pct_today: f64,
+    pub drawdown_pct: f64,
+    pub open_positions: u32,
+    pub consecutive_losses: u32,
+    pub last_loss_at: Option<DateTime<Utc>>,
+    pub size_multiplier: f64,
+    /// Human-readable list of currently active survival rules ("loss-streak",
+    /// "vol-spike", etc.). Used by the /survival endpoint and Manager prompt.
+    pub reasons: Vec<String>,
+    pub ts: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SurvivalMode {
+    /// Score >= 80, full risk authority.
+    Healthy,
+    /// 50 <= score < 80, moderate caution (≈0.6× size).
+    Cautious,
+    /// 25 <= score < 50, defensive mode (≈0.3× size, manager skews to veto).
+    Defensive,
+    /// score < 25 OR cooldown active — pause new entries.
+    Frozen,
+    /// equity <= death_line — bot is "dead". Auto-flat all positions
+    /// and refuse trading until manually unfrozen by the operator.
+    Dead,
+}
+
+impl SurvivalMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Healthy => "healthy",
+            Self::Cautious => "cautious",
+            Self::Defensive => "defensive",
+            Self::Frozen => "frozen",
+            Self::Dead => "dead",
+        }
+    }
 }
 
 #[derive(Debug, Clone)]

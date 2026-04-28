@@ -1,119 +1,220 @@
 //! Risk agent — listens for `PreSignalEmitted`, applies the existing
 //! 8-gate `RiskManager` plus the `LearningPolicy` verdict, sizes the
 //! trade, and publishes a `RiskVerdict` event.
+//!
+//! The agent additionally reads the latest [`SurvivalState`] (set by
+//! the SurvivalAgent) and the latest funding rate from `FeedsSnapshot`
+//! to apply two extra gates before sizing:
+//!
+//! * **Survival gate** — if the bot is in `Frozen` or `Dead` mode it
+//!   refuses every entry.
+//! * **Funding gate** — extreme funding rates are a strong sign of a
+//!   one-sided crowd; we block longs when funding > +0.1% and shorts
+//!   when funding < -0.1% (configurable). Default thresholds are
+//!   wide enough to never bite under normal conditions but tight
+//!   enough to dodge a funding-flush.
 
-use crate::agents::messages::{AgentEvent, RiskOutcome, RiskVerdictMsg};
+use crate::agents::messages::{
+    AgentEvent, FeedsSnapshotMsg, RiskOutcome, RiskVerdictMsg, SurvivalMode, SurvivalState,
+};
 use crate::agents::MessageBus;
+use crate::data::Side;
 use crate::execution::RiskManager;
 use crate::learning::LearningPolicy;
+use parking_lot::Mutex;
+use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::task::JoinHandle;
 use tracing::{info, warn};
+
+#[derive(Debug, Clone)]
+pub struct RiskAgentConfig {
+    pub base_min_ta_threshold: u8,
+    pub base_min_llm_floor: u8,
+    /// Funding rate threshold beyond which we reject same-direction
+    /// trades. Binance reports funding as a fraction (e.g. 0.0005 ==
+    /// 0.05%). Default 0.001 = 0.1%.
+    pub funding_block_threshold: f64,
+}
+
+impl Default for RiskAgentConfig {
+    fn default() -> Self {
+        Self {
+            base_min_ta_threshold: 60,
+            base_min_llm_floor: 70,
+            funding_block_threshold: 0.001,
+        }
+    }
+}
 
 pub fn spawn(
     bus: MessageBus,
     risk: Arc<RiskManager>,
     policy: LearningPolicy,
-    base_min_ta_threshold: u8,
-    base_min_llm_floor: u8,
+    cfg: RiskAgentConfig,
 ) -> JoinHandle<()> {
     let mut rx = bus.subscribe();
+    let survival: Arc<Mutex<Option<SurvivalState>>> = Arc::new(Mutex::new(None));
+    let funding: Arc<Mutex<HashMap<String, f64>>> = Arc::new(Mutex::new(HashMap::new()));
+
     tokio::spawn(async move {
         info!("risk agent starting");
         while let Ok(ev) = rx.recv().await {
-            if matches!(ev, AgentEvent::Shutdown) {
-                break;
-            }
-            let AgentEvent::PreSignalEmitted { signal, regime } = ev else {
-                continue;
-            };
-            let verdict =
-                policy.evaluate(signal.strategy.as_str(), regime.as_str(), &signal.symbol);
-            let effective_ta_threshold = (base_min_ta_threshold as i32
-                + verdict.ta_threshold_delta as i32)
-                .clamp(0, 100) as u8;
-            let llm_floor = verdict
-                .llm_min_confidence_floor
-                .unwrap_or(base_min_llm_floor)
-                .max(base_min_llm_floor);
+            match ev {
+                AgentEvent::Shutdown => break,
+                AgentEvent::SurvivalUpdated(s) => {
+                    *survival.lock() = Some(s);
+                    continue;
+                }
+                AgentEvent::FeedsSnapshot(FeedsSnapshotMsg {
+                    symbol, snapshot, ..
+                }) => {
+                    if let Some(f) = &snapshot.funding {
+                        funding.lock().insert(symbol, f.rate);
+                    }
+                    continue;
+                }
+                AgentEvent::PreSignalEmitted { signal, regime } => {
+                    // Survival hard-gate: refuse outright when frozen or dead.
+                    let surv = survival.lock().clone();
+                    if let Some(s) = &surv {
+                        if matches!(s.mode, SurvivalMode::Frozen | SurvivalMode::Dead) {
+                            bus.publish(AgentEvent::RiskVerdict(RiskVerdictMsg {
+                                signal: signal.clone(),
+                                regime,
+                                outcome: RiskOutcome::Blocked,
+                                size: 0.0,
+                                size_multiplier: 0.0,
+                                effective_ta_threshold: cfg.base_min_ta_threshold,
+                                effective_llm_floor: cfg.base_min_llm_floor,
+                                matched_lessons: vec![],
+                                reason: Some(format!(
+                                    "survival mode {} (score {})",
+                                    s.mode.as_str(),
+                                    s.score
+                                )),
+                            }));
+                            continue;
+                        }
+                    }
 
-            // Hard policy block?
-            if !verdict.allowed {
-                bus.publish(AgentEvent::RiskVerdict(RiskVerdictMsg {
-                    signal: signal.clone(),
-                    regime,
-                    outcome: RiskOutcome::Blocked,
-                    size: 0.0,
-                    size_multiplier: 0.0,
-                    effective_ta_threshold,
-                    effective_llm_floor: llm_floor,
-                    matched_lessons: verdict.matched_lessons,
-                    reason: Some("learning policy blocked".into()),
-                }));
-                continue;
-            }
+                    let verdict =
+                        policy.evaluate(signal.strategy.as_str(), regime.as_str(), &signal.symbol);
+                    let effective_ta_threshold = (cfg.base_min_ta_threshold as i32
+                        + verdict.ta_threshold_delta as i32)
+                        .clamp(0, 100) as u8;
+                    let llm_floor = verdict
+                        .llm_min_confidence_floor
+                        .unwrap_or(cfg.base_min_llm_floor)
+                        .max(cfg.base_min_llm_floor);
 
-            if signal.ta_confidence < effective_ta_threshold {
-                bus.publish(AgentEvent::RiskVerdict(RiskVerdictMsg {
-                    signal: signal.clone(),
-                    regime,
-                    outcome: RiskOutcome::Blocked,
-                    size: 0.0,
-                    size_multiplier: verdict.size_multiplier,
-                    effective_ta_threshold,
-                    effective_llm_floor: llm_floor,
-                    matched_lessons: verdict.matched_lessons,
-                    reason: Some(format!(
-                        "TA {} < threshold {}",
-                        signal.ta_confidence, effective_ta_threshold
-                    )),
-                }));
-                continue;
-            }
+                    // Hard policy block?
+                    if !verdict.allowed {
+                        bus.publish(AgentEvent::RiskVerdict(RiskVerdictMsg {
+                            signal: signal.clone(),
+                            regime,
+                            outcome: RiskOutcome::Blocked,
+                            size: 0.0,
+                            size_multiplier: 0.0,
+                            effective_ta_threshold,
+                            effective_llm_floor: llm_floor,
+                            matched_lessons: verdict.matched_lessons,
+                            reason: Some("learning policy blocked".into()),
+                        }));
+                        continue;
+                    }
 
-            if let Err(e) = risk.can_open_position() {
-                warn!(symbol = %signal.symbol, reason = %e, "risk gate blocked");
-                bus.publish(AgentEvent::RiskVerdict(RiskVerdictMsg {
-                    signal: signal.clone(),
-                    regime,
-                    outcome: RiskOutcome::Blocked,
-                    size: 0.0,
-                    size_multiplier: verdict.size_multiplier,
-                    effective_ta_threshold,
-                    effective_llm_floor: llm_floor,
-                    matched_lessons: verdict.matched_lessons,
-                    reason: Some(e.to_string()),
-                }));
-                continue;
-            }
+                    if signal.ta_confidence < effective_ta_threshold {
+                        bus.publish(AgentEvent::RiskVerdict(RiskVerdictMsg {
+                            signal: signal.clone(),
+                            regime,
+                            outcome: RiskOutcome::Blocked,
+                            size: 0.0,
+                            size_multiplier: verdict.size_multiplier,
+                            effective_ta_threshold,
+                            effective_llm_floor: llm_floor,
+                            matched_lessons: verdict.matched_lessons,
+                            reason: Some(format!(
+                                "TA {} < threshold {}",
+                                signal.ta_confidence, effective_ta_threshold
+                            )),
+                        }));
+                        continue;
+                    }
 
-            let base_size = risk.calculate_size(signal.entry, signal.stop_loss);
-            let size = base_size * verdict.size_multiplier;
-            if size <= 0.0 {
-                bus.publish(AgentEvent::RiskVerdict(RiskVerdictMsg {
-                    signal: signal.clone(),
-                    regime,
-                    outcome: RiskOutcome::Blocked,
-                    size: 0.0,
-                    size_multiplier: verdict.size_multiplier,
-                    effective_ta_threshold,
-                    effective_llm_floor: llm_floor,
-                    matched_lessons: verdict.matched_lessons,
-                    reason: Some("size <= 0".into()),
-                }));
-                continue;
+                    if let Err(e) = risk.can_open_position() {
+                        warn!(symbol = %signal.symbol, reason = %e, "risk gate blocked");
+                        bus.publish(AgentEvent::RiskVerdict(RiskVerdictMsg {
+                            signal: signal.clone(),
+                            regime,
+                            outcome: RiskOutcome::Blocked,
+                            size: 0.0,
+                            size_multiplier: verdict.size_multiplier,
+                            effective_ta_threshold,
+                            effective_llm_floor: llm_floor,
+                            matched_lessons: verdict.matched_lessons,
+                            reason: Some(e.to_string()),
+                        }));
+                        continue;
+                    }
+
+                    // Funding-rate gate.
+                    let funding_rate = funding.lock().get(&signal.symbol).copied().unwrap_or(0.0);
+                    let funding_blocks = match signal.side {
+                        Side::Long => funding_rate >= cfg.funding_block_threshold,
+                        Side::Short => funding_rate <= -cfg.funding_block_threshold,
+                    };
+                    if funding_blocks {
+                        bus.publish(AgentEvent::RiskVerdict(RiskVerdictMsg {
+                            signal: signal.clone(),
+                            regime,
+                            outcome: RiskOutcome::Blocked,
+                            size: 0.0,
+                            size_multiplier: verdict.size_multiplier,
+                            effective_ta_threshold,
+                            effective_llm_floor: llm_floor,
+                            matched_lessons: verdict.matched_lessons,
+                            reason: Some(format!(
+                                "extreme funding {:.4}% (threshold ±{:.4}%)",
+                                funding_rate * 100.0,
+                                cfg.funding_block_threshold * 100.0
+                            )),
+                        }));
+                        continue;
+                    }
+
+                    // RiskManager.calculate_size already multiplies by
+                    // the SurvivalAgent-controlled size_multiplier.
+                    let base_size = risk.calculate_size(signal.entry, signal.stop_loss);
+                    let size = base_size * verdict.size_multiplier;
+                    if size <= 0.0 {
+                        bus.publish(AgentEvent::RiskVerdict(RiskVerdictMsg {
+                            signal: signal.clone(),
+                            regime,
+                            outcome: RiskOutcome::Blocked,
+                            size: 0.0,
+                            size_multiplier: verdict.size_multiplier,
+                            effective_ta_threshold,
+                            effective_llm_floor: llm_floor,
+                            matched_lessons: verdict.matched_lessons,
+                            reason: Some("size <= 0".into()),
+                        }));
+                        continue;
+                    }
+                    bus.publish(AgentEvent::RiskVerdict(RiskVerdictMsg {
+                        signal,
+                        regime,
+                        outcome: RiskOutcome::Allowed,
+                        size,
+                        size_multiplier: verdict.size_multiplier,
+                        effective_ta_threshold,
+                        effective_llm_floor: llm_floor,
+                        matched_lessons: verdict.matched_lessons,
+                        reason: None,
+                    }));
+                }
+                _ => {}
             }
-            bus.publish(AgentEvent::RiskVerdict(RiskVerdictMsg {
-                signal,
-                regime,
-                outcome: RiskOutcome::Allowed,
-                size,
-                size_multiplier: verdict.size_multiplier,
-                effective_ta_threshold,
-                effective_llm_floor: llm_floor,
-                matched_lessons: verdict.matched_lessons,
-                reason: None,
-            }));
         }
     })
 }
