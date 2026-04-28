@@ -41,6 +41,8 @@ use tracing_subscriber::EnvFilter;
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    // Load `.env` (if any) before tracing so RUST_LOG works too.
+    load_dotenv();
     init_tracing();
 
     let default_path = PathBuf::from("config/default.toml");
@@ -67,6 +69,70 @@ fn init_tracing() {
 
 fn overlay_path_from_env() -> Option<PathBuf> {
     std::env::var("ARIA_CONFIG_OVERLAY").ok().map(PathBuf::from)
+}
+
+/// Load environment variables from a `.env` file, if present.
+///
+/// Search order:
+/// 1. `ARIA_DOTENV` env var (explicit path)
+/// 2. `./.env` (current working directory)
+/// 3. The directory containing the binary (handy for symlinked `aria`)
+///
+/// Lines like `KEY=VALUE` (optionally `export KEY=VALUE`) are parsed.
+/// Quoted values (`"..."` or `'...'`) get the quotes stripped. Any
+/// variable already present in the process environment is preserved
+/// (so a real export still wins over the file).
+fn load_dotenv() {
+    let candidates: Vec<PathBuf> = {
+        let mut v = Vec::new();
+        if let Ok(p) = std::env::var("ARIA_DOTENV") {
+            v.push(PathBuf::from(p));
+        }
+        v.push(PathBuf::from(".env"));
+        if let Ok(exe) = std::env::current_exe() {
+            if let Some(dir) = exe.parent() {
+                v.push(dir.join(".env"));
+            }
+        }
+        v
+    };
+
+    for path in candidates {
+        if !path.is_file() {
+            continue;
+        }
+        let Ok(content) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        for raw in content.lines() {
+            let line = raw.trim();
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            let line = line.strip_prefix("export ").unwrap_or(line);
+            let Some((key, value)) = line.split_once('=') else {
+                continue;
+            };
+            let key = key.trim();
+            if key.is_empty() {
+                continue;
+            }
+            let mut val = value.trim().to_string();
+            // Strip surrounding quotes if balanced.
+            if (val.starts_with('"') && val.ends_with('"') && val.len() >= 2)
+                || (val.starts_with('\'') && val.ends_with('\'') && val.len() >= 2)
+            {
+                val = val[1..val.len() - 1].to_string();
+            }
+            // Don't overwrite a real export already in the env.
+            if std::env::var(key).is_err() {
+                std::env::set_var(key, val);
+            }
+        }
+        // Stop at the first .env we successfully parse.
+        eprintln!("loaded env from {}", path.display());
+        break;
+    }
 }
 
 async fn run_backtest(cfg: &Config) -> Result<()> {

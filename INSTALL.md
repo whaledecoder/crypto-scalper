@@ -83,11 +83,21 @@ cp .env.example .env
 $EDITOR .env
 ```
 
-Then load it into your shell before running:
+ARIA **auto-loads `.env`** from the current working directory at
+startup (no manual `source` required), so just running `aria` from
+the repo directory is enough.
+
+If you prefer to load it into the shell yourself (for example to use
+the same vars in other commands), the manual form still works:
 
 ```bash
 set -a; source .env; set +a
 ```
+
+> Real `export`-ed environment variables always win over the file —
+> so a value set in your shell takes priority over the same key in
+> `.env`. Use `ARIA_DOTENV=/some/path/to/.env` to point ARIA at a
+> non-default file.
 
 ### Required for paper mode
 
