@@ -2,9 +2,10 @@
 //! OHLCV builders. Publishes `Tick`, `BookTicker` and `CandleClosed`
 //! events on the bus.
 
-use crate::agents::messages::AgentEvent;
+use crate::agents::messages::{AgentEvent, AgentId};
 use crate::agents::MessageBus;
 use crate::data::{ws_client::WsClient, OhlcvBuilder, WsEvent};
+use chrono::Utc;
 use std::collections::HashMap;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
@@ -31,6 +32,22 @@ async fn run(bus: MessageBus, cfg: DataAgentConfig) {
     let (tx, mut rx) = mpsc::channel::<WsEvent>(4096);
     let ws = WsClient::new(cfg.ws_base_url, cfg.symbols.clone());
     tokio::spawn(async move { ws.run(tx).await });
+
+    // Independent periodic heartbeat — keeps the watchdog satisfied
+    // even during quiet markets or while a reconnect is in progress.
+    {
+        let bus_hb = bus.clone();
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(std::time::Duration::from_secs(20));
+            loop {
+                tick.tick().await;
+                bus_hb.publish(AgentEvent::Heartbeat {
+                    from: AgentId::Data,
+                    ts: Utc::now(),
+                });
+            }
+        });
+    }
 
     while let Some(event) = rx.recv().await {
         match event {
@@ -60,5 +77,10 @@ async fn run(bus: MessageBus, cfg: DataAgentConfig) {
                 warn!(%reason, "data agent: ws disconnected — reconnect pending");
             }
         }
+        // Activity-based heartbeat — every event is a sign of life.
+        bus.publish(AgentEvent::Heartbeat {
+            from: AgentId::Data,
+            ts: Utc::now(),
+        });
     }
 }

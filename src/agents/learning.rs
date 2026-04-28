@@ -1,7 +1,7 @@
 //! Learning agent — periodically rebuilds the `LearningPolicy` from the
 //! trade journal and broadcasts the refresh event.
 
-use crate::agents::messages::AgentEvent;
+use crate::agents::messages::{AgentEvent, AgentId};
 use crate::agents::MessageBus;
 use crate::learning::{
     lessons::{LessonConfig, LessonExtractor},
@@ -25,6 +25,23 @@ pub fn spawn(
         info!(refresh_secs, "learning agent starting");
         let extractor = LessonExtractor::new(cfg);
         let mut tick = tokio::time::interval(Duration::from_secs(refresh_secs.max(60)));
+        // Independent heartbeat task — learning's own refresh interval
+        // can be many minutes long, far longer than the watchdog
+        // tolerance. Send a 30s heartbeat so the watchdog never trips
+        // just because we're between policy refreshes.
+        {
+            let bus_hb = bus.clone();
+            tokio::spawn(async move {
+                let mut hb = tokio::time::interval(Duration::from_secs(30));
+                loop {
+                    hb.tick().await;
+                    bus_hb.publish(AgentEvent::Heartbeat {
+                        from: AgentId::Learning,
+                        ts: Utc::now(),
+                    });
+                }
+            });
+        }
         // First tick fires immediately; if the journal is empty the
         // policy simply stays empty.
         loop {

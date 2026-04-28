@@ -34,8 +34,12 @@ impl Default for WatchdogConfig {
                 AgentId::Survival,
                 AgentId::Learning,
             ],
-            liveness_timeout_secs: 90,
-            check_interval_secs: 15,
+            // 180s is generous enough to absorb a slow WS reconnect on
+            // mobile networks (Termux), a delayed feeds poll, and a
+            // missed heartbeat tick — yet still fast enough to catch a
+            // truly stuck agent within ~3 minutes.
+            liveness_timeout_secs: 180,
+            check_interval_secs: 30,
         }
     }
 }

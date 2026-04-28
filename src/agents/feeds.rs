@@ -1,7 +1,7 @@
 //! External-feeds agent — periodically polls fear&greed / funding /
 //! news / sentiment / on-chain feeds and republishes the snapshot.
 
-use crate::agents::messages::{AgentEvent, FeedsSnapshotMsg};
+use crate::agents::messages::{AgentEvent, AgentId, FeedsSnapshotMsg};
 use crate::agents::MessageBus;
 use crate::feeds::{
     ExternalSnapshot, FearGreedClient, FundingClient, NewsClient, OnchainClient, SentimentClient,
@@ -54,6 +54,12 @@ pub fn spawn(
                     ts: Utc::now(),
                 }));
             }
+            // Liveness heartbeat after each poll cycle, regardless of
+            // whether any feed actually returned data.
+            bus.publish(AgentEvent::Heartbeat {
+                from: AgentId::Feeds,
+                ts: Utc::now(),
+            });
         }
     })
 }
