@@ -372,6 +372,39 @@ impl Config {
         if let Ok(v) = std::env::var("BINANCE_API_SECRET") {
             self.exchange.api_secret = v;
         }
+        // Brain LLM provider/model/api_base overrides — applied BEFORE the
+        // api-key lookup so the right `*_API_KEY` env var is picked.
+        if let Ok(v) = std::env::var("ARIA_LLM_PROVIDER") {
+            if !v.is_empty() {
+                self.llm.provider = v;
+            }
+        }
+        if let Ok(v) = std::env::var("ARIA_LLM_MODEL") {
+            if !v.is_empty() {
+                self.llm.model = v;
+            }
+        }
+        if let Ok(v) = std::env::var("ARIA_LLM_API_BASE") {
+            if !v.is_empty() {
+                self.llm.api_base = v;
+            }
+        }
+        // Manager LLM provider/model/api_base overrides.
+        if let Ok(v) = std::env::var("ARIA_MANAGER_PROVIDER") {
+            if !v.is_empty() {
+                self.manager.provider = v;
+            }
+        }
+        if let Ok(v) = std::env::var("ARIA_MANAGER_MODEL") {
+            if !v.is_empty() {
+                self.manager.model = v;
+            }
+        }
+        if let Ok(v) = std::env::var("ARIA_MANAGER_API_BASE") {
+            if !v.is_empty() {
+                self.manager.api_base = v;
+            }
+        }
         // LLM key — checked in priority order. The first non-empty match wins,
         // so a user can have multiple keys exported simultaneously and the
         // active provider just picks its own.
@@ -566,5 +599,42 @@ equity_usd = 1000.0
         let cfg = Config::load(&base, Some(&overlay)).unwrap();
         approx::assert_abs_diff_eq!(cfg.risk.risk_per_trade_pct, 0.5);
         approx::assert_abs_diff_eq!(cfg.risk.equity_usd, 1000.0);
+    }
+
+    #[test]
+    fn env_overrides_llm_model_and_provider() {
+        // Run serially-friendly: clear afterwards even on panic.
+        struct EnvGuard(&'static [&'static str]);
+        impl Drop for EnvGuard {
+            fn drop(&mut self) {
+                for k in self.0 {
+                    std::env::remove_var(k);
+                }
+            }
+        }
+        let _guard = EnvGuard(&[
+            "ARIA_LLM_PROVIDER",
+            "ARIA_LLM_MODEL",
+            "ARIA_LLM_API_BASE",
+            "ARIA_MANAGER_MODEL",
+        ]);
+        std::env::set_var("ARIA_LLM_PROVIDER", "openrouter");
+        std::env::set_var("ARIA_LLM_MODEL", "deepseek/deepseek-chat");
+        std::env::set_var(
+            "ARIA_LLM_API_BASE",
+            "https://api.deepseek.com/v1/chat/completions",
+        );
+        std::env::set_var("ARIA_MANAGER_MODEL", "anthropic/claude-3.5-sonnet");
+
+        let p = std::path::PathBuf::from("config/default.toml");
+        let cfg = Config::load(&p, None).expect("default config must parse");
+
+        assert_eq!(cfg.llm.provider, "openrouter");
+        assert_eq!(cfg.llm.model, "deepseek/deepseek-chat");
+        assert_eq!(
+            cfg.llm.api_base,
+            "https://api.deepseek.com/v1/chat/completions"
+        );
+        assert_eq!(cfg.manager.model, "anthropic/claude-3.5-sonnet");
     }
 }

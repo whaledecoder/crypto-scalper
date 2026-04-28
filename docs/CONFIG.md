@@ -245,7 +245,20 @@ by `[control]` settings.
 | `TELEGRAM_BOT_TOKEN` | alerts + commands |
 | `TELEGRAM_CHAT_ID` | alert destination |
 | `ARIA_CONFIG_OVERLAY` | path to overlay TOML |
+| `ARIA_LLM_PROVIDER` | overrides `[llm] provider` |
+| `ARIA_LLM_MODEL` | overrides `[llm] model` |
+| `ARIA_LLM_API_BASE` | overrides `[llm] api_base` |
+| `ARIA_MANAGER_PROVIDER` | overrides `[manager] provider` |
+| `ARIA_MANAGER_MODEL` | overrides `[manager] model` |
+| `ARIA_MANAGER_API_BASE` | overrides `[manager] api_base` |
 | `RUST_LOG` | tracing filter (e.g. `info,crypto_scalper::agents::survival=debug`) |
+
+> **Tip — quick model swap without editing config:**
+> ```bash
+> export ARIA_LLM_MODEL=deepseek/deepseek-chat
+> export ARIA_MANAGER_MODEL=anthropic/claude-3.5-sonnet
+> aria
+> ```
 
 ---
 
