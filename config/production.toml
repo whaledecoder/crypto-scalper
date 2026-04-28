@@ -1,0 +1,10 @@
+# Live-trading overlay. Applied on top of default.toml. Requires API keys.
+[mode]
+run_mode = "live"
+dry_run  = false
+
+[risk]
+risk_per_trade_pct = 0.8
+max_open_positions = 3
+max_daily_loss_pct = 3.0
+max_drawdown_pct   = 10.0
