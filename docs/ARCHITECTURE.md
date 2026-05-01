@@ -346,6 +346,12 @@ from `prompt-1777632664168.md`:
   aggregation for higher-timeframe confirmation.
 - `src/backtest/monte_carlo.rs` — drawdown confidence intervals from
   deterministic PnL reshuffles.
+- `src/strategy/hmm.rs` and `src/strategy/kalman.rs` — probabilistic
+  regime inference and trend estimation primitives.
+- `src/strategy/pairs.rs` and `src/feeds/funding_arb.rs` — pairs-trading
+  spread helpers and funding-edge classification.
+- `src/feeds/alt_data.rs` and `src/feeds/options.rs` — normalized
+  alternative-data and options-skew sentiment scores.
 
 These modules are intentionally independent and test-covered so they can
 be wired deeper into live sizing/strategy selection in small, auditable PRs.

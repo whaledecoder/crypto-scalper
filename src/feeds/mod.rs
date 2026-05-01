@@ -1,9 +1,12 @@
 //! External data feeds for fundamental / sentiment / on-chain context.
 
+pub mod alt_data;
 pub mod fear_greed;
 pub mod funding;
+pub mod funding_arb;
 pub mod news;
 pub mod onchain;
+pub mod options;
 pub mod sentiment;
 
 pub use fear_greed::{FearGreedClient, FearGreedSnapshot};

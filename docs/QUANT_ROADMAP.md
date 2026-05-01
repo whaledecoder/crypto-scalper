@@ -14,15 +14,18 @@ Status against the supplied markdown roadmap.
 - Phase 2 execution quality tracking and limit-order fill probability/planning.
 - Phase 5 strategy retirement, A/B variant comparison, and parameter sensitivity helpers.
 - Monte Carlo drawdown confidence intervals.
+- HMM regime inference primitive.
+- Kalman trend estimation primitive.
+- BTC/ETH pairs spread and hedge-ratio helpers.
+- Funding-rate arbitrage edge classifier.
+- Alternative-data factor scoring.
+- Deribit-style options IV-skew sentiment scoring.
+- Research summary health classification.
 
 ## Still intentionally pending
 
-- HMM regime detector.
-- Kalman trend estimation.
-- BTC/ETH pairs trading and cointegration.
-- Funding-rate arbitrage strategy.
-- Alternative-data factor scoring.
-- Deribit options IV-skew sentiment.
+- Wiring advanced-alpha primitives into live strategy selection.
 - Production CLI/reporting pipeline for automated research reports.
+- Real external data adapters for Deribit/options and richer alternative data.
 
-The remaining items require deeper data dependencies or new strategy workflows, so they should be delivered as focused PRs after the core validation/execution primitives are merged.
+The remaining items require deeper data dependencies or live-trading calibration, so they should be delivered as focused PRs after the primitives are merged.

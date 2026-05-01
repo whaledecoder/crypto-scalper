@@ -6,9 +6,12 @@
 
 pub mod ab_test;
 pub mod ema_ribbon;
+pub mod hmm;
+pub mod kalman;
 pub mod mean_reversion;
 pub mod momentum;
 pub mod multi_timeframe;
+pub mod pairs;
 pub mod regime;
 pub mod retirement;
 pub mod squeeze;
