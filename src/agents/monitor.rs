@@ -3,10 +3,11 @@
 //! domain; the Monitor is the only place where observability concerns
 //! live.
 
-use crate::agents::messages::{AgentEvent, BrainOutcome, ManagerAction};
+use crate::agents::messages::{AgentEvent, BrainOutcome, ControlCommand, ManagerAction};
 use crate::agents::MessageBus;
 use crate::llm::engine::Decision;
 use crate::monitoring::{MetricsState, TelegramNotifier, TradeJournal, TradeRecord};
+use crate::strategy::state::StrategyName;
 use chrono::{DateTime, Utc};
 use parking_lot::Mutex as PlMutex;
 use std::collections::HashMap;
@@ -32,10 +33,34 @@ struct StatusCounters {
     prices: HashMap<String, PriceSnapshot>,
     candles: HashMap<String, u64>,
     signals: u64,
+    risk_allowed: u64,
+    risk_blocked: u64,
     brain_calls: u64,
+    brain_go: u64,
+    brain_nogo: u64,
+    brain_wait: u64,
     manager_calls: u64,
     manager_vetoes: u64,
     orders_filled: u64,
+    last_signal: Option<SignalSnapshot>,
+    last_block: Option<DecisionSnapshot>,
+    last_brain: Option<DecisionSnapshot>,
+    last_manager: Option<DecisionSnapshot>,
+}
+
+#[derive(Clone)]
+struct SignalSnapshot {
+    symbol: String,
+    strategy: StrategyName,
+    side: crate::data::Side,
+    confidence: u8,
+}
+
+#[derive(Clone)]
+struct DecisionSnapshot {
+    symbol: String,
+    stage: &'static str,
+    reason: String,
 }
 
 fn fmt_counts(map: &HashMap<String, u64>) -> String {
@@ -83,6 +108,26 @@ fn fmt_prices(map: &HashMap<String, PriceSnapshot>, now: DateTime<Utc>) -> Strin
         .join(" ")
 }
 
+fn fmt_signal(s: &Option<SignalSnapshot>) -> String {
+    match s {
+        Some(s) => format!(
+            "{}:{}:{}:{}",
+            s.symbol,
+            s.strategy.as_str(),
+            s.side.as_str(),
+            s.confidence
+        ),
+        None => "-".to_string(),
+    }
+}
+
+fn fmt_decision(s: &Option<DecisionSnapshot>) -> String {
+    match s {
+        Some(s) => format!("{}:{}:{}", s.symbol, s.stage, s.reason),
+        None => "-".to_string(),
+    }
+}
+
 pub fn spawn(
     bus: MessageBus,
     metrics: Arc<MetricsState>,
@@ -112,10 +157,19 @@ pub fn spawn(
                     prices = %fmt_prices(&c.prices, now),
                     candles = %fmt_counts(&c.candles),
                     signals = c.signals,
+                    risk_allowed = c.risk_allowed,
+                    risk_blocked = c.risk_blocked,
                     brain = c.brain_calls,
+                    brain_go = c.brain_go,
+                    brain_nogo = c.brain_nogo,
+                    brain_wait = c.brain_wait,
                     manager = c.manager_calls,
                     vetoes = c.manager_vetoes,
                     fills = c.orders_filled,
+                    last_signal = %fmt_signal(&c.last_signal),
+                    last_block = %fmt_decision(&c.last_block),
+                    last_brain = %fmt_decision(&c.last_brain),
+                    last_manager = %fmt_decision(&c.last_manager),
                     "status"
                 );
             }
@@ -137,16 +191,77 @@ pub fn spawn(
                 AgentEvent::CandleClosed { symbol, .. } => {
                     *counters.lock().candles.entry(symbol).or_insert(0) += 1;
                 }
-                AgentEvent::PreSignalEmitted { .. } => {
+                AgentEvent::PreSignalEmitted { signal, .. } => {
                     metrics.update(|m| m.signals_today += 1);
-                    counters.lock().signals += 1;
+                    let mut c = counters.lock();
+                    c.signals += 1;
+                    c.last_signal = Some(SignalSnapshot {
+                        symbol: signal.symbol.clone(),
+                        strategy: signal.strategy,
+                        side: signal.side,
+                        confidence: signal.ta_confidence,
+                    });
+                }
+                AgentEvent::RiskVerdict(risk) => {
+                    let mut c = counters.lock();
+                    match risk.outcome {
+                        crate::agents::messages::RiskOutcome::Allowed => {
+                            c.risk_allowed += 1;
+                            c.last_block = None;
+                            info!(
+                                symbol = %risk.signal.symbol,
+                                strategy = %risk.signal.strategy.as_str(),
+                                side = %risk.signal.side.as_str(),
+                                size = risk.size,
+                                ta = risk.signal.ta_confidence,
+                                ta_threshold = risk.effective_ta_threshold,
+                                llm_floor = risk.effective_llm_floor,
+                                "risk: allowed signal"
+                            );
+                        }
+                        crate::agents::messages::RiskOutcome::Blocked => {
+                            c.risk_blocked += 1;
+                            let reason = risk.reason.clone().unwrap_or_else(|| "blocked".into());
+                            c.last_block = Some(DecisionSnapshot {
+                                symbol: risk.signal.symbol.clone(),
+                                stage: "risk",
+                                reason: reason.clone(),
+                            });
+                            info!(
+                                symbol = %risk.signal.symbol,
+                                strategy = %risk.signal.strategy.as_str(),
+                                side = %risk.signal.side.as_str(),
+                                ta = risk.signal.ta_confidence,
+                                ta_threshold = risk.effective_ta_threshold,
+                                llm_floor = risk.effective_llm_floor,
+                                reason = %reason,
+                                "risk: blocked signal"
+                            );
+                        }
+                    }
                 }
                 AgentEvent::BrainOutcomeReady(brain) => {
                     last_brain
                         .lock()
                         .insert(brain.signal.symbol.clone(), brain.clone());
                     record_brain(&metrics, &brain);
-                    counters.lock().brain_calls += 1;
+                    let mut c = counters.lock();
+                    c.brain_calls += 1;
+                    match brain.decision.decision {
+                        Decision::Go => c.brain_go += 1,
+                        Decision::NoGo => c.brain_nogo += 1,
+                        Decision::Wait => c.brain_wait += 1,
+                    }
+                    c.last_brain = Some(DecisionSnapshot {
+                        symbol: brain.signal.symbol.clone(),
+                        stage: "brain",
+                        reason: format!(
+                            "{:?}/{}: {}",
+                            brain.decision.decision,
+                            brain.decision.confidence,
+                            brain.decision.reasoning.summary
+                        ),
+                    });
                 }
                 AgentEvent::ManagerVerdictEmitted(v) => {
                     {
@@ -155,13 +270,42 @@ pub fn spawn(
                         if matches!(v.action, ManagerAction::Veto { .. }) {
                             c.manager_vetoes += 1;
                         }
+                        c.last_manager = Some(DecisionSnapshot {
+                            symbol: v.proposal.symbol.clone(),
+                            stage: "manager",
+                            reason: manager_action_summary(&v.action),
+                        });
                     }
                     if matches!(v.action, ManagerAction::Veto { .. }) {
                         info!(
                             symbol = %v.proposal.symbol,
+                            reason = %manager_action_summary(&v.action),
                             "monitor: trade vetoed by manager"
                         );
                     }
+                }
+                AgentEvent::ControlCommand(ControlCommand::StatusRequest) => {
+                    let c = counters.lock();
+                    let now = Utc::now();
+                    info!(
+                        prices = %fmt_prices(&c.prices, now),
+                        candles = %fmt_counts(&c.candles),
+                        signals = c.signals,
+                        risk_allowed = c.risk_allowed,
+                        risk_blocked = c.risk_blocked,
+                        brain = c.brain_calls,
+                        brain_go = c.brain_go,
+                        brain_nogo = c.brain_nogo,
+                        brain_wait = c.brain_wait,
+                        manager = c.manager_calls,
+                        vetoes = c.manager_vetoes,
+                        fills = c.orders_filled,
+                        last_signal = %fmt_signal(&c.last_signal),
+                        last_block = %fmt_decision(&c.last_block),
+                        last_brain = %fmt_decision(&c.last_brain),
+                        last_manager = %fmt_decision(&c.last_manager),
+                        "status requested"
+                    );
                 }
                 AgentEvent::OrderFilled {
                     client_id,
@@ -255,6 +399,21 @@ fn record_brain(metrics: &MetricsState, brain: &BrainOutcome) {
             m.llm_offline_fallbacks += 1;
         }
     });
+}
+
+fn manager_action_summary(action: &ManagerAction) -> String {
+    match action {
+        ManagerAction::Approve => "approve".to_string(),
+        ManagerAction::Veto { reason } => format!("veto: {reason}"),
+        ManagerAction::Adjust {
+            size_multiplier,
+            sl_offset_bps,
+            tp_offset_bps,
+            reason,
+        } => format!(
+            "adjust size={size_multiplier:.2} sl={sl_offset_bps:.1}bps tp={tp_offset_bps:.1}bps: {reason}"
+        ),
+    }
 }
 
 fn log_open_trade(
