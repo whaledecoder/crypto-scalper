@@ -351,7 +351,8 @@ from `prompt-1777632664168.md`:
 - `src/strategy/pairs.rs` and `src/feeds/funding_arb.rs` — pairs-trading
   spread helpers and funding-edge classification.
 - `src/feeds/alt_data.rs` and `src/feeds/options.rs` — normalized
-  alternative-data and options-skew sentiment scores.
+  alternative-data scoring and public Deribit BTC/ETH options-skew
+  snapshots.
 - `[advanced_alpha]` can wire external-data/funding/Kalman context into
   `SignalAgent` as a pre-risk confirmation gate. It is disabled by
   default and never directly sizes orders.

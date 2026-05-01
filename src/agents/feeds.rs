@@ -4,7 +4,8 @@
 use crate::agents::messages::{AgentEvent, AgentId, FeedsSnapshotMsg};
 use crate::agents::MessageBus;
 use crate::feeds::{
-    ExternalSnapshot, FearGreedClient, FundingClient, NewsClient, OnchainClient, SentimentClient,
+    DeribitOptionsClient, ExternalSnapshot, FearGreedClient, FundingClient, NewsClient,
+    OnchainClient, SentimentClient,
 };
 use chrono::Utc;
 use std::sync::Arc;
@@ -18,6 +19,7 @@ pub struct FeedsAgentDeps {
     pub news: Arc<NewsClient>,
     pub sentiment: Arc<SentimentClient>,
     pub onchain: Arc<OnchainClient>,
+    pub options: Arc<DeribitOptionsClient>,
 }
 
 pub fn spawn(
@@ -34,12 +36,13 @@ pub fn spawn(
             for symbol in &symbols {
                 let base_owned: String = symbol.trim_end_matches("USDT").to_string();
                 let base_slice: [&str; 1] = [base_owned.as_str()];
-                let (fg, news, sent, onc, fund) = tokio::join!(
+                let (fg, news, sent, onc, fund, options) = tokio::join!(
                     deps.fear_greed.fetch(),
                     deps.news.fetch(&base_slice),
                     deps.sentiment.fetch(symbol),
                     deps.onchain.fetch(symbol),
                     deps.funding.fetch(symbol),
+                    deps.options.fetch(symbol),
                 );
                 let snapshot = ExternalSnapshot {
                     fear_greed: fg.ok(),
@@ -47,6 +50,7 @@ pub fn spawn(
                     sentiment: sent.ok(),
                     onchain: onc.ok(),
                     funding: fund.ok(),
+                    options: options.ok().flatten(),
                 };
                 bus.publish(AgentEvent::FeedsSnapshot(FeedsSnapshotMsg {
                     symbol: symbol.clone(),

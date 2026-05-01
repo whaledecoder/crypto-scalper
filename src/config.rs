@@ -212,8 +212,14 @@ pub struct Feeds {
     pub glassnode_api_key: String,
     #[serde(default)]
     pub whalealert_api_key: String,
+    #[serde(default = "default_deribit_base_url")]
+    pub deribit_base_url: String,
     #[serde(default)]
     pub rss_feeds: Vec<String>,
+}
+
+fn default_deribit_base_url() -> String {
+    "https://www.deribit.com".into()
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]

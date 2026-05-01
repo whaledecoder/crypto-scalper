@@ -86,6 +86,7 @@ cryptopanic_api_key = ""   # env CRYPTOPANIC_API_KEY
 lunarcrush_api_key  = ""   # env LUNARCRUSH_API_KEY
 glassnode_api_key   = ""   # env GLASSNODE_API_KEY
 whalealert_api_key  = ""   # env WHALE_ALERT_API_KEY
+deribit_base_url = "https://www.deribit.com"
 rss_feeds = [
     "https://www.coindesk.com/arc/outboundfeeds/rss/",
     "https://decrypt.co/feed",
