@@ -32,9 +32,9 @@ fn binomial_probability(n: u32, k: u32, p: f64) -> Option<f64> {
     if k > n || !(0.0..=1.0).contains(&p) {
         return None;
     }
-    let k = k.min(n - k);
+    let k_small = k.min(n - k);
     let mut coeff = 1.0;
-    for i in 0..k {
+    for i in 0..k_small {
         coeff *= (n - i) as f64 / (i + 1) as f64;
     }
     Some(coeff * p.powi(k as i32) * (1.0 - p).powi((n - k) as i32))
@@ -72,5 +72,11 @@ mod tests {
         let p = win_rate_significance(8, 10).unwrap();
         assert!(p > 0.0 && p <= 1.0);
         assert_eq!(win_rate_significance(11, 10), None);
+    }
+
+    #[test]
+    fn binomial_probability_preserves_original_success_count() {
+        let p = binomial_probability(10, 8, 0.3).unwrap();
+        approx::assert_abs_diff_eq!(p, 0.0014467005, epsilon = 1e-12);
     }
 }
