@@ -21,11 +21,12 @@ Status against the supplied markdown roadmap.
 - Alternative-data factor scoring.
 - Deribit-style options IV-skew sentiment scoring.
 - Research summary health classification.
+- Backtest research report output in markdown or JSON.
+- Safe advanced-alpha gate scaffolding for future live wiring.
 
 ## Still intentionally pending
 
 - Wiring advanced-alpha primitives into live strategy selection.
-- Production CLI/reporting pipeline for automated research reports.
 - Real external data adapters for Deribit/options and richer alternative data.
 
 The remaining items require deeper data dependencies or live-trading calibration, so they should be delivered as focused PRs after the primitives are merged.

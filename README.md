@@ -293,6 +293,8 @@ open_time_ms,open,high,low,close,volume
 Run with `[mode] run_mode = "backtest"`; you'll get a per-symbol report
 with WR, profit factor, annualized Sharpe/Sortino, and max drawdown. The
 simulator subtracts entry/exit fees, adverse slippage, and market-impact cost.
+Backtest also prints a research report table with Monte Carlo drawdown and
+health classification; set `ARIA_RESEARCH_REPORT_FORMAT=json` for JSON output.
 
 ## Project Layout
 

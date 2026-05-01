@@ -352,6 +352,8 @@ from `prompt-1777632664168.md`:
   spread helpers and funding-edge classification.
 - `src/feeds/alt_data.rs` and `src/feeds/options.rs` — normalized
   alternative-data and options-skew sentiment scores.
+- Backtest mode emits a compact research report table by default; set
+  `ARIA_RESEARCH_REPORT_FORMAT=json` for JSON output.
 
 These modules are intentionally independent and test-covered so they can
 be wired deeper into live sizing/strategy selection in small, auditable PRs.

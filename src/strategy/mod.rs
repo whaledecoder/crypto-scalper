@@ -5,6 +5,7 @@
 //! strategy gets consulted each candle.
 
 pub mod ab_test;
+pub mod alpha_gate;
 pub mod ema_ribbon;
 pub mod hmm;
 pub mod kalman;
