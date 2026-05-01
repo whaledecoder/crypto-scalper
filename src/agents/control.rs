@@ -1,10 +1,12 @@
 //! ControlAgent — operator command surface.
 //!
-//! Provides two ingress paths:
+//! Provides three ingress paths:
 //!
 //! 1. **Telegram bot long-poll** (`/status`, `/positions`, `/freeze`,
 //!    `/unfreeze`, `/flat`, `/health`).
-//! 2. **Internal control file** at `/tmp/aria.control` — write a
+//! 2. **Terminal stdin** (`status`, `positions`, `freeze`, `unfreeze`,
+//!    `flat`, `health`, `help`) when running interactively.
+//! 3. **Internal control file** at `/tmp/aria.control` — write a
 //!    single line (`freeze`, `flat`, `unfreeze`, `status`) and the
 //!    agent picks it up. Useful for headless servers without
 //!    Telegram.
@@ -23,6 +25,7 @@ use serde_json::Value;
 use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::Arc;
+use tokio::io::{self, AsyncBufReadExt};
 use tokio::task::JoinHandle;
 use tracing::{info, warn};
 
@@ -61,6 +64,15 @@ pub fn spawn(deps: ControlAgentDeps) -> JoinHandle<()> {
         let poll_secs = cfg.poll_secs.max(1);
         tokio::spawn(async move {
             telegram_loop(bus_t, token, chat_id, allowed, risk_t, book_t, poll_secs).await;
+        });
+    }
+
+    {
+        let bus_s = bus.clone();
+        let risk_s = risk.clone();
+        let book_s = book.clone();
+        tokio::spawn(async move {
+            stdin_loop(bus_s, risk_s, book_s).await;
         });
     }
 
@@ -181,6 +193,29 @@ async fn send_telegram(client: &Client, token: &str, chat_id: &str, text: &str) 
     }
 }
 
+async fn stdin_loop(bus: MessageBus, risk: Arc<RiskManager>, book: Arc<PositionBook>) {
+    let mut lines = io::BufReader::new(io::stdin()).lines();
+    info!(
+        "stdin control ready — commands: status, positions, freeze, unfreeze, flat, health, help"
+    );
+    loop {
+        match lines.next_line().await {
+            Ok(Some(line)) => {
+                let reply = handle_command(&line, &bus, &risk, &book);
+                if !reply.is_empty() {
+                    println!("{reply}");
+                    info!(reply = %reply, "control command");
+                }
+            }
+            Ok(None) => break,
+            Err(e) => {
+                warn!(error = %e, "stdin control read failed");
+                break;
+            }
+        }
+    }
+}
+
 fn handle_command(
     text: &str,
     bus: &MessageBus,
@@ -285,6 +320,7 @@ async fn file_loop(bus: MessageBus, path: PathBuf) {
                 "flat" => bus.publish(AgentEvent::ControlCommand(ControlCommand::FlatAll {
                     reason: "control file".into(),
                 })),
+                "status" => bus.publish(AgentEvent::ControlCommand(ControlCommand::StatusRequest)),
                 _ => {}
             }
         }
