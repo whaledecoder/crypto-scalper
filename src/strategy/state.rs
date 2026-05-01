@@ -95,6 +95,7 @@ pub struct SymbolState {
     pub last_keltner_upper: Option<f64>,
     pub last_keltner_lower: Option<f64>,
     pub last_roc: Option<f64>,
+    pub last_ofi: Option<f64>,
 
     pub order_book: OrderBook,
     pub volume_sma: f64,
@@ -131,6 +132,7 @@ impl SymbolState {
             last_keltner_upper: None,
             last_keltner_lower: None,
             last_roc: None,
+            last_ofi: None,
             order_book: OrderBook::default(),
             volume_sma: 0.0,
             volume_sma_count: 0,

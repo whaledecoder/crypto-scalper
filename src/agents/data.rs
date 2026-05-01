@@ -64,12 +64,16 @@ async fn run(bus: MessageBus, cfg: DataAgentConfig) {
             WsEvent::BookTicker {
                 symbol,
                 best_bid,
+                bid_qty,
                 best_ask,
+                ask_qty,
             } => {
                 bus.publish(AgentEvent::BookTicker {
                     symbol,
                     best_bid,
+                    bid_qty,
                     best_ask,
+                    ask_qty,
                 });
             }
             WsEvent::Heartbeat => {}

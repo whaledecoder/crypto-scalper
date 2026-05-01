@@ -13,5 +13,8 @@ pub mod feeds;
 pub mod indicators;
 pub mod learning;
 pub mod llm;
+pub mod microstructure;
 pub mod monitoring;
+pub mod portfolio;
+pub mod research;
 pub mod strategy;

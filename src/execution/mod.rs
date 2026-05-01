@@ -5,6 +5,7 @@ pub mod exchange;
 pub mod orders;
 pub mod paper;
 pub mod position;
+pub mod quality;
 pub mod risk;
 pub mod tcm;
 

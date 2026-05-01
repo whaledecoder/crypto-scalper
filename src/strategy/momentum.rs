@@ -57,6 +57,11 @@ impl Strategy for Momentum {
         if vol_ratio >= 2.5 {
             score += 8.0;
         }
+        if (side == Side::Long && s.last_ofi.unwrap_or(0.0) > 0.0)
+            || (side == Side::Short && s.last_ofi.unwrap_or(0.0) < 0.0)
+        {
+            score += 4.0;
+        }
         if roc.abs() > 1.0 {
             score += 7.0;
         }

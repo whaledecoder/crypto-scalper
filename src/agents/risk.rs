@@ -86,7 +86,9 @@ pub fn spawn(
                 AgentEvent::BookTicker {
                     symbol,
                     best_bid,
+                    bid_qty: _,
                     best_ask,
+                    ask_qty: _,
                 } => {
                     let mid = (best_bid + best_ask) / 2.0;
                     if mid > 0.0 && best_ask >= best_bid {

@@ -50,6 +50,14 @@ impl OrderBook {
         b / a
     }
 
+    pub fn top_bid_qty(&self) -> Option<f64> {
+        self.bids.first().map(|l| l.qty)
+    }
+
+    pub fn top_ask_qty(&self) -> Option<f64> {
+        self.asks.first().map(|l| l.qty)
+    }
+
     /// Return the biggest bid wall in the book.
     pub fn bid_wall(&self) -> Option<Level> {
         self.bids.iter().copied().max_by(|x, y| {
@@ -71,13 +79,17 @@ impl OrderBook {
     /// Replace the top-of-book with a single (bid, ask) quote — used for
     /// streaming `bookTicker` updates.
     pub fn set_top(&mut self, best_bid: f64, best_ask: f64) {
+        self.set_top_with_qty(best_bid, 0.0, best_ask, 0.0);
+    }
+
+    pub fn set_top_with_qty(&mut self, best_bid: f64, bid_qty: f64, best_ask: f64, ask_qty: f64) {
         self.bids = vec![Level {
             price: best_bid,
-            qty: 0.0,
+            qty: bid_qty,
         }];
         self.asks = vec![Level {
             price: best_ask,
-            qty: 0.0,
+            qty: ask_qty,
         }];
     }
 }
@@ -113,5 +125,13 @@ mod tests {
         approx::assert_abs_diff_eq!(ob.spread().unwrap(), 0.1, epsilon = 1e-9);
         approx::assert_abs_diff_eq!(ob.bid_ask_ratio(2), 8.0 / 4.0, epsilon = 1e-9);
         assert_eq!(ob.bid_wall().unwrap().price, 100.0);
+    }
+
+    #[test]
+    fn stores_top_quantities() {
+        let mut ob = OrderBook::default();
+        ob.set_top_with_qty(100.0, 7.0, 100.1, 5.0);
+        assert_eq!(ob.top_bid_qty().unwrap(), 7.0);
+        assert_eq!(ob.top_ask_qty().unwrap(), 5.0);
     }
 }

@@ -25,7 +25,9 @@ pub enum WsEvent {
     BookTicker {
         symbol: String,
         best_bid: f64,
+        bid_qty: f64,
         best_ask: f64,
+        ask_qty: f64,
     },
     Heartbeat,
     Disconnected(String),
@@ -153,8 +155,12 @@ struct BinanceBookTicker {
     symbol: String,
     #[serde(rename = "b")]
     best_bid: String,
+    #[serde(rename = "B")]
+    bid_qty: String,
     #[serde(rename = "a")]
     best_ask: String,
+    #[serde(rename = "A")]
+    ask_qty: String,
 }
 
 async fn handle_text(txt: &str, tx: &mpsc::Sender<WsEvent>) -> anyhow::Result<()> {
@@ -189,7 +195,9 @@ async fn handle_text(txt: &str, tx: &mpsc::Sender<WsEvent>) -> anyhow::Result<()
             .send(WsEvent::BookTicker {
                 symbol: parsed.data.symbol,
                 best_bid: parsed.data.best_bid.parse()?,
+                bid_qty: parsed.data.bid_qty.parse()?,
                 best_ask: parsed.data.best_ask.parse()?,
+                ask_qty: parsed.data.ask_qty.parse()?,
             })
             .await;
     }

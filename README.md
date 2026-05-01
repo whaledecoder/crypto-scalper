@@ -299,7 +299,10 @@ src/
 ├── config.rs            # TOML + ENV loader (with [survival] / [control] defaults)
 ├── data/                # Layer 1 — WS, OHLCV builder, order book
 ├── indicators/          # Incremental TA primitives (EMA, RSI, BB, ATR, ADX, VWAP, …)
+├── microstructure/      # OFI, VPIN, toxicity analytics
 ├── strategy/            # Layer 2 — symbol state, regime detector, 5 strategies
+├── research/            # IC/IR, decay, walk-forward, permutation significance
+├── portfolio/           # Kelly, vol target, correlation, VaR/CVaR helpers
 ├── feeds/               # External feeds (F&G, funding, news, sentiment, on-chain)
 ├── llm/                 # Layer 3 — context builder, prompts, multi-provider engine
 ├── execution/           # Layer 4 — risk gates, paper/Binance exchanges, position book
@@ -317,7 +320,7 @@ src/
 ```bash
 cargo fmt --all -- --check
 cargo clippy --all-targets --all-features -- -D warnings   # 0 warnings
-cargo test --lib                                           # 34/34 passing
+cargo test --lib
 cargo build --release
 ```
 

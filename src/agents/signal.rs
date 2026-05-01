@@ -5,6 +5,7 @@
 use crate::agents::messages::AgentEvent;
 use crate::agents::MessageBus;
 use crate::config::Schedule;
+use crate::microstructure::Ofi;
 use crate::strategy::{
     ema_ribbon::EmaRibbon,
     mean_reversion::MeanReversion,
@@ -31,16 +32,28 @@ pub fn spawn(
     let mut rx = bus.subscribe();
     tokio::spawn(async move {
         info!(?active, "signal agent starting");
+        let mut ofi_by_symbol: HashMap<String, Ofi> = HashMap::new();
         while let Ok(ev) = rx.recv().await {
             match ev {
                 AgentEvent::BookTicker {
                     symbol,
                     best_bid,
+                    bid_qty,
                     best_ask,
+                    ask_qty,
                 } => {
+                    let ofi = ofi_by_symbol
+                        .entry(symbol.clone())
+                        .or_insert_with(|| Ofi::new(20))
+                        .update(bid_qty, ask_qty);
                     let mut states = states.lock().await;
                     if let Some(state) = states.get_mut(&symbol) {
-                        state.order_book.set_top(best_bid, best_ask);
+                        state
+                            .order_book
+                            .set_top_with_qty(best_bid, bid_qty, best_ask, ask_qty);
+                        if let Some(value) = ofi {
+                            state.last_ofi = Some(value);
+                        }
                     }
                 }
                 AgentEvent::CandleClosed { symbol, candle } => {
@@ -96,6 +109,7 @@ pub fn spawn(
                                     side = %s.side.as_str(),
                                     confidence = s.ta_confidence,
                                     reason = %s.reason,
+                                    ofi = state.last_ofi,
                                     "strategy fired pre-signal"
                                 );
                                 if best

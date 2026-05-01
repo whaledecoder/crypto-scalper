@@ -7,6 +7,7 @@
 pub mod ema_ribbon;
 pub mod mean_reversion;
 pub mod momentum;
+pub mod multi_timeframe;
 pub mod regime;
 pub mod squeeze;
 pub mod state;

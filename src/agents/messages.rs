@@ -51,7 +51,9 @@ pub enum AgentEvent {
     BookTicker {
         symbol: String,
         best_bid: f64,
+        bid_qty: f64,
         best_ask: f64,
+        ask_qty: f64,
     },
     /// `DataAgent` finalized a candle for a symbol.
     CandleClosed { symbol: String, candle: Candle },

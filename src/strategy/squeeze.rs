@@ -42,7 +42,9 @@ impl Strategy for Squeeze {
         };
 
         let score: f64 = (65.0_f64 + roc.abs().min(5.0) * 3.0).clamp(0.0, 100.0);
-        let score = score as u8;
+        let aligned_ofi = (side == Side::Long && s.last_ofi.unwrap_or(0.0) > 0.0)
+            || (side == Side::Short && s.last_ofi.unwrap_or(0.0) < 0.0);
+        let score = (score + if aligned_ofi { 4.0 } else { 0.0 }).clamp(0.0, 100.0) as u8;
         Some(PreSignal {
             symbol: s.symbol.clone(),
             strategy: StrategyName::Squeeze,
