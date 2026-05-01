@@ -163,6 +163,15 @@ impl MarketContext {
             }
         }
 
+        if let Some(o) = &self.external.options {
+            let _ = writeln!(s, "\n[OPTIONS SKEW]");
+            let _ = writeln!(s, "  25d call IV   : {:.2}%", o.call_25d_iv * 100.0);
+            let _ = writeln!(s, "  25d put IV    : {:.2}%", o.put_25d_iv * 100.0);
+            let _ = writeln!(s, "  ATM IV        : {:.2}%", o.atm_iv * 100.0);
+            let _ = writeln!(s, "  Skew bps      : {:+.1}", o.skew_bps());
+            let _ = writeln!(s, "  Sentiment     : {:+.2}", o.sentiment_score());
+        }
+
         if let Some(o) = &self.external.onchain {
             let _ = writeln!(s, "\n[ON-CHAIN]");
             if let Some(v) = o.exchange_inflow_24h {

@@ -23,8 +23,8 @@ use crypto_scalper::{
     },
     execution::{risk::RiskLimits, tcm::TransactionCostModel},
     feeds::{
-        ExternalSnapshot, FearGreedClient, FundingClient, NewsClient, OnchainClient,
-        SentimentClient,
+        DeribitOptionsClient, ExternalSnapshot, FearGreedClient, FundingClient, NewsClient,
+        OnchainClient, SentimentClient,
     },
     learning::{lessons::LessonConfig, LearningPolicy},
     llm::engine::{LlmEngine, LlmEngineConfig, LlmProvider},
@@ -290,6 +290,9 @@ async fn run_agents(cfg: Config) -> Result<()> {
         Some(cfg.feeds.glassnode_api_key.clone()).filter(|s| !s.is_empty()),
         Some(cfg.feeds.whalealert_api_key.clone()).filter(|s| !s.is_empty()),
     ));
+    let options = Arc::new(DeribitOptionsClient::new(
+        cfg.feeds.deribit_base_url.clone(),
+    ));
 
     // --- Per-symbol state (owned by SignalAgent, read by BrainAgent) ---
     let interval_secs = cfg
@@ -415,6 +418,7 @@ async fn run_agents(cfg: Config) -> Result<()> {
             news,
             sentiment,
             onchain,
+            options,
         },
         cfg.pairs.symbols.clone(),
         60,

@@ -24,9 +24,10 @@ Status against the supplied markdown roadmap.
 - Backtest research report output in markdown or JSON.
 - Safe advanced-alpha gate scaffolding for future live wiring.
 - Disabled-by-default advanced-alpha wiring into pre-signal confirmation.
+- Public Deribit BTC/ETH options adapter wired into `FeedsSnapshot`.
 
 ## Still intentionally pending
 
-- Real external data adapters for Deribit/options and richer alternative data.
+- Richer paid alternative-data/on-chain adapters beyond current public/fallback feeds.
 
 The remaining items require deeper data dependencies or live-trading calibration, so they should be delivered as focused PRs after the primitives are merged.

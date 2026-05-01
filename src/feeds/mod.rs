@@ -13,6 +13,7 @@ pub use fear_greed::{FearGreedClient, FearGreedSnapshot};
 pub use funding::{FundingClient, FundingSnapshot};
 pub use news::{NewsClient, NewsItem, NewsSnapshot};
 pub use onchain::{OnchainClient, OnchainSnapshot};
+pub use options::{DeribitOptionsClient, OptionSkewSnapshot};
 pub use sentiment::{SentimentClient, SentimentSnapshot};
 
 use serde::{Deserialize, Serialize};
@@ -25,4 +26,5 @@ pub struct ExternalSnapshot {
     pub onchain: Option<OnchainSnapshot>,
     pub funding: Option<FundingSnapshot>,
     pub fear_greed: Option<FearGreedSnapshot>,
+    pub options: Option<OptionSkewSnapshot>,
 }

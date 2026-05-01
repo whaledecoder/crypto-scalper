@@ -175,10 +175,12 @@ the risk/LLM pipeline. It does not directly size orders.
 | `lunarcrush_api_key` | `""` | env `LUNARCRUSH_API_KEY` |
 | `glassnode_api_key` | `""` | env `GLASSNODE_API_KEY` |
 | `whalealert_api_key` | `""` | env `WHALE_ALERT_API_KEY` |
+| `deribit_base_url` | `"https://www.deribit.com"` | public Deribit endpoint for BTC/ETH options IV skew |
 | `rss_feeds` | CoinDesk, Decrypt, CoinTelegraph | RSS news sources (no key needed) |
 
 Missing keys → that sub-feed silently emits an empty snapshot. Nothing
-crashes.
+crashes. Deribit options data uses public endpoints; unsupported symbols
+emit no options snapshot.
 
 ---
 
