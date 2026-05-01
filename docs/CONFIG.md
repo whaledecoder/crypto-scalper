@@ -158,12 +158,15 @@ To **disable** the dead zone, set `start == end` (e.g. both 0).
 | `enabled` | `false` | master switch; default is a no-op so paper/live behavior stays unchanged |
 | `min_abs_score` | `0.20` | alpha gate threshold for allow/block; values inside the band reduce confidence |
 | `reduce_confidence_delta` | `5` | TA-confidence reduction when context is inconclusive |
+| `feed_max_age_secs` | `180` | max age for `FeedsSnapshot`; missing/stale feeds bypass the gate |
 | `kalman_process_noise` | `0.01` | Kalman trend process noise |
 | `kalman_measurement_noise` | `1.0` | Kalman trend measurement noise |
 
 When enabled, `SignalAgent` uses latest `FeedsSnapshot` plus Kalman trend
 context to block adverse candidates or reduce their TA confidence before
-the risk/LLM pipeline. It does not directly size orders.
+the risk/LLM pipeline. Missing or stale feed snapshots are treated as no-op
+so the gate does not trade on stale external context. It does not directly
+size orders.
 
 ---
 
@@ -171,16 +174,18 @@ the risk/LLM pipeline. It does not directly size orders.
 
 | Key | Default | Meaning |
 |---|---|---|
-| `cryptopanic_api_key` | `""` | env `CRYPTOPANIC_API_KEY` |
-| `lunarcrush_api_key` | `""` | env `LUNARCRUSH_API_KEY` |
-| `glassnode_api_key` | `""` | env `GLASSNODE_API_KEY` |
-| `whalealert_api_key` | `""` | env `WHALE_ALERT_API_KEY` |
+| `cryptopanic_api_key` | `""` | env `CRYPTOPANIC_API_KEY`; optional news + vote sentiment |
+| `lunarcrush_api_key` | `""` | env `LUNARCRUSH_API_KEY`; optional social sentiment/volume |
+| `glassnode_api_key` | `""` | env `GLASSNODE_API_KEY`; optional BTC/ETH exchange inflow/outflow + SOPR |
+| `whalealert_api_key` | `""` | env `WHALE_ALERT_API_KEY`; optional BTC/ETH whale tx count |
 | `deribit_base_url` | `"https://www.deribit.com"` | public Deribit endpoint for BTC/ETH options IV skew |
 | `rss_feeds` | CoinDesk, Decrypt, CoinTelegraph | RSS news sources (no key needed) |
 
 Missing keys → that sub-feed silently emits an empty snapshot. Nothing
 crashes. Deribit options data uses public endpoints; unsupported symbols
-emit no options snapshot.
+emit no options snapshot. Glassnode/Whale Alert requests are fail-soft and
+only populate fields when keys are configured. CryptoPanic/LunarCrush also
+fail soft; RSS/news fallback remains available without paid keys.
 
 ---
 

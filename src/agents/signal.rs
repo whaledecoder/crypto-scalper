@@ -22,7 +22,7 @@ use crate::strategy::{
     vwap_scalp::VwapScalp,
     RegimeDetector, Strategy,
 };
-use chrono::{Timelike, Utc};
+use chrono::{DateTime, Duration as ChronoDuration, Timelike, Utc};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::Mutex;
@@ -40,11 +40,17 @@ pub fn spawn(
     tokio::spawn(async move {
         info!(?active, "signal agent starting");
         let mut ofi_by_symbol: HashMap<String, Ofi> = HashMap::new();
-        let mut feeds_by_symbol: HashMap<String, ExternalSnapshot> = HashMap::new();
+        let mut feeds_by_symbol: HashMap<String, TimedExternalSnapshot> = HashMap::new();
         while let Ok(ev) = rx.recv().await {
             match ev {
                 AgentEvent::FeedsSnapshot(msg) => {
-                    feeds_by_symbol.insert(msg.symbol, msg.snapshot);
+                    feeds_by_symbol.insert(
+                        msg.symbol,
+                        TimedExternalSnapshot {
+                            snapshot: msg.snapshot,
+                            ts: msg.ts,
+                        },
+                    );
                 }
                 AgentEvent::BookTicker {
                     symbol,
@@ -167,19 +173,21 @@ pub fn spawn(
 fn apply_advanced_alpha(
     signal: Option<PreSignal>,
     state: &SymbolState,
-    snapshot: Option<&ExternalSnapshot>,
+    snapshot: Option<&TimedExternalSnapshot>,
     cfg: &AdvancedAlphaCfg,
 ) -> Option<PreSignal> {
     if !cfg.enabled {
         return signal;
     }
     let mut signal = signal?;
-    let snapshot = snapshot.cloned().unwrap_or_default();
+    let Some(snapshot) = fresh_snapshot(snapshot, cfg, Utc::now()) else {
+        return Some(signal);
+    };
     let prices: Vec<f64> = state.candles.iter().map(|c| c.close).collect();
     let decision = advanced_alpha_gate(
         AdvancedAlphaInputs {
-            alt_data: alt_data_inputs_from_snapshot(&snapshot),
-            funding_rate: funding_rate_from_snapshot(&snapshot),
+            alt_data: alt_data_inputs_from_snapshot(snapshot),
+            funding_rate: funding_rate_from_snapshot(snapshot),
             trend_score: kalman_trend_score(
                 &prices,
                 cfg.kalman_process_noise,
@@ -199,6 +207,29 @@ fn apply_advanced_alpha(
             Some(signal)
         }
         AlphaGateDecision::Block => None,
+    }
+}
+
+#[derive(Debug, Clone)]
+struct TimedExternalSnapshot {
+    snapshot: ExternalSnapshot,
+    ts: DateTime<Utc>,
+}
+
+fn fresh_snapshot<'a>(
+    snapshot: Option<&'a TimedExternalSnapshot>,
+    cfg: &AdvancedAlphaCfg,
+    now: DateTime<Utc>,
+) -> Option<&'a ExternalSnapshot> {
+    let snapshot = snapshot?;
+    if cfg.feed_max_age_secs == 0 {
+        return Some(&snapshot.snapshot);
+    }
+    let max_age = ChronoDuration::seconds(cfg.feed_max_age_secs as i64);
+    if now - snapshot.ts <= max_age {
+        Some(&snapshot.snapshot)
+    } else {
+        None
     }
 }
 
@@ -224,6 +255,7 @@ fn in_dead_zone(s: &Schedule) -> bool {
 mod tests {
     use super::*;
     use crate::data::{Candle, Side};
+    use crate::feeds::sentiment::SentimentSnapshot;
     use crate::strategy::state::{PreSignal, StrategyName, SymbolState};
 
     fn test_signal() -> PreSignal {
@@ -284,10 +316,14 @@ mod tests {
     fn advanced_alpha_can_reduce_confidence() {
         let signal = test_signal();
         let state = warmed_state();
+        let fresh = TimedExternalSnapshot {
+            snapshot: ExternalSnapshot::default(),
+            ts: Utc::now(),
+        };
         let filtered = apply_advanced_alpha(
             Some(signal),
             &state,
-            None,
+            Some(&fresh),
             &AdvancedAlphaCfg {
                 enabled: true,
                 min_abs_score: 0.6,
@@ -298,5 +334,37 @@ mod tests {
         .expect("neutral alpha context should reduce, not block");
         assert_eq!(filtered.ta_confidence, 73);
         assert!(filtered.reason.contains("alpha_gate=reduce"));
+    }
+
+    #[test]
+    fn advanced_alpha_skips_when_feed_missing_or_stale() {
+        let signal = test_signal();
+        let state = warmed_state();
+        let cfg = AdvancedAlphaCfg {
+            enabled: true,
+            feed_max_age_secs: 60,
+            ..AdvancedAlphaCfg::default()
+        };
+        let missing = apply_advanced_alpha(Some(signal.clone()), &state, None, &cfg)
+            .expect("missing feed should bypass alpha gate");
+        assert_eq!(missing.ta_confidence, signal.ta_confidence);
+
+        let stale = TimedExternalSnapshot {
+            snapshot: ExternalSnapshot {
+                sentiment: Some(SentimentSnapshot {
+                    symbol: "BTCUSDT".into(),
+                    social_volume: 1,
+                    social_volume_change_pct: 0.0,
+                    galaxy_score: None,
+                    sentiment: -1.0,
+                    top_keywords: vec![],
+                }),
+                ..ExternalSnapshot::default()
+            },
+            ts: Utc::now() - ChronoDuration::seconds(120),
+        };
+        let filtered = apply_advanced_alpha(Some(signal.clone()), &state, Some(&stale), &cfg)
+            .expect("stale feed should bypass alpha gate");
+        assert_eq!(filtered.ta_confidence, signal.ta_confidence);
     }
 }

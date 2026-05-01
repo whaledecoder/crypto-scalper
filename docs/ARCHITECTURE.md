@@ -353,9 +353,13 @@ from `prompt-1777632664168.md`:
 - `src/feeds/alt_data.rs` and `src/feeds/options.rs` — normalized
   alternative-data scoring and public Deribit BTC/ETH options-skew
   snapshots.
+- `src/feeds/news.rs` and `src/feeds/sentiment.rs` — RSS/CryptoPanic news
+  plus optional LunarCrush social sentiment context.
+- `src/feeds/onchain.rs` — optional Glassnode exchange inflow/outflow/SOPR and
+  Whale Alert large-transaction context, fail-soft when keys are absent.
 - `[advanced_alpha]` can wire external-data/funding/Kalman context into
   `SignalAgent` as a pre-risk confirmation gate. It is disabled by
-  default and never directly sizes orders.
+  default, ignores stale feed snapshots, and never directly sizes orders.
 - Backtest mode emits a compact research report table by default; set
   `ARIA_RESEARCH_REPORT_FORMAT=json` for JSON output.
 
