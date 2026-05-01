@@ -67,6 +67,8 @@ pub struct AdvancedAlphaCfg {
     pub min_abs_score: f64,
     #[serde(default = "default_alpha_reduce_confidence_delta")]
     pub reduce_confidence_delta: u8,
+    #[serde(default = "default_alpha_feed_max_age_secs")]
+    pub feed_max_age_secs: u64,
     #[serde(default = "default_alpha_process_noise")]
     pub kalman_process_noise: f64,
     #[serde(default = "default_alpha_measurement_noise")]
@@ -78,6 +80,9 @@ fn default_alpha_min_abs_score() -> f64 {
 }
 fn default_alpha_reduce_confidence_delta() -> u8 {
     5
+}
+fn default_alpha_feed_max_age_secs() -> u64 {
+    180
 }
 fn default_alpha_process_noise() -> f64 {
     0.01
@@ -92,6 +97,7 @@ impl Default for AdvancedAlphaCfg {
             enabled: false,
             min_abs_score: default_alpha_min_abs_score(),
             reduce_confidence_delta: default_alpha_reduce_confidence_delta(),
+            feed_max_age_secs: default_alpha_feed_max_age_secs(),
             kalman_process_noise: default_alpha_process_noise(),
             kalman_measurement_noise: default_alpha_measurement_noise(),
         }

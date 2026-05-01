@@ -31,6 +31,7 @@ min_ta_confidence = 65
 enabled = false
 min_abs_score = 0.20
 reduce_confidence_delta = 5
+feed_max_age_secs = 180
 kalman_process_noise = 0.01
 kalman_measurement_noise = 1.0
 

@@ -24,6 +24,7 @@ Status against the supplied markdown roadmap.
 - Backtest research report output in markdown or JSON.
 - Safe advanced-alpha gate scaffolding for future live wiring.
 - Disabled-by-default advanced-alpha wiring into pre-signal confirmation.
+- Advanced-alpha feed staleness guard.
 - Public Deribit BTC/ETH options adapter wired into `FeedsSnapshot`.
 - Optional Glassnode/Whale Alert BTC/ETH on-chain adapters.
 

@@ -357,7 +357,7 @@ from `prompt-1777632664168.md`:
   Whale Alert large-transaction context, fail-soft when keys are absent.
 - `[advanced_alpha]` can wire external-data/funding/Kalman context into
   `SignalAgent` as a pre-risk confirmation gate. It is disabled by
-  default and never directly sizes orders.
+  default, ignores stale feed snapshots, and never directly sizes orders.
 - Backtest mode emits a compact research report table by default; set
   `ARIA_RESEARCH_REPORT_FORMAT=json` for JSON output.
 

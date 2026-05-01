@@ -158,12 +158,15 @@ To **disable** the dead zone, set `start == end` (e.g. both 0).
 | `enabled` | `false` | master switch; default is a no-op so paper/live behavior stays unchanged |
 | `min_abs_score` | `0.20` | alpha gate threshold for allow/block; values inside the band reduce confidence |
 | `reduce_confidence_delta` | `5` | TA-confidence reduction when context is inconclusive |
+| `feed_max_age_secs` | `180` | max age for `FeedsSnapshot`; missing/stale feeds bypass the gate |
 | `kalman_process_noise` | `0.01` | Kalman trend process noise |
 | `kalman_measurement_noise` | `1.0` | Kalman trend measurement noise |
 
 When enabled, `SignalAgent` uses latest `FeedsSnapshot` plus Kalman trend
 context to block adverse candidates or reduce their TA confidence before
-the risk/LLM pipeline. It does not directly size orders.
+the risk/LLM pipeline. Missing or stale feed snapshots are treated as no-op
+so the gate does not trade on stale external context. It does not directly
+size orders.
 
 ---
 
