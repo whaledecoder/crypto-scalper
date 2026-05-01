@@ -67,18 +67,33 @@ pub fn reports_to_json(reports: &[ResearchReport]) -> String {
             serde_json::json!({
                 "symbol": r.symbol,
                 "trades": r.trades,
-                "win_rate": r.win_rate,
-                "profit_factor": r.profit_factor,
-                "net_pnl": r.net_pnl,
-                "sharpe": r.sharpe,
-                "max_drawdown_pct": r.max_drawdown_pct,
-                "monte_carlo_drawdown_p95": r.monte_carlo_drawdown_p95,
-                "monte_carlo_drawdown_p99": r.monte_carlo_drawdown_p99,
+                "win_rate": json_f64(r.win_rate),
+                "profit_factor": json_f64(r.profit_factor),
+                "net_pnl": json_f64(r.net_pnl),
+                "sharpe": json_f64(r.sharpe),
+                "max_drawdown_pct": json_f64(r.max_drawdown_pct),
+                "monte_carlo_drawdown_p95": json_opt_f64(r.monte_carlo_drawdown_p95),
+                "monte_carlo_drawdown_p99": json_opt_f64(r.monte_carlo_drawdown_p99),
                 "health": format!("{:?}", r.health),
             })
         })
         .collect();
     serde_json::to_string_pretty(&rows).unwrap_or_else(|_| "[]".into())
+}
+
+fn json_f64(value: f64) -> serde_json::Value {
+    if value.is_finite() {
+        serde_json::json!(value)
+    } else {
+        serde_json::json!(format!("{value}"))
+    }
+}
+
+fn json_opt_f64(value: Option<f64>) -> serde_json::Value {
+    match value {
+        Some(x) => json_f64(x),
+        None => serde_json::Value::Null,
+    }
 }
 
 #[cfg(test)]
@@ -100,5 +115,25 @@ mod tests {
         };
         let report = ResearchReport::from_backtest(&result);
         assert!(reports_to_markdown(&[report]).contains("BTCUSDT"));
+    }
+
+    #[test]
+    fn json_report_preserves_non_finite_metrics_as_strings() {
+        let report = ResearchReport {
+            symbol: "BTCUSDT".into(),
+            trades: 3,
+            win_rate: 1.0,
+            profit_factor: f64::INFINITY,
+            net_pnl: 10.0,
+            sharpe: f64::NAN,
+            max_drawdown_pct: 0.0,
+            monte_carlo_drawdown_p95: Some(f64::INFINITY),
+            monte_carlo_drawdown_p99: None,
+            health: StrategyHealth::Observe,
+        };
+        let json = reports_to_json(&[report]);
+        assert!(json.contains("\"profit_factor\": \"inf\""));
+        assert!(json.contains("\"sharpe\": \"NaN\""));
+        assert!(json.contains("\"monte_carlo_drawdown_p95\": \"inf\""));
     }
 }
