@@ -27,9 +27,10 @@ Status against the supplied markdown roadmap.
 - Advanced-alpha feed staleness guard.
 - Public Deribit BTC/ETH options adapter wired into `FeedsSnapshot`.
 - Optional Glassnode/Whale Alert BTC/ETH on-chain adapters.
+- Optional CryptoPanic/LunarCrush alternative-data adapters.
 
 ## Still intentionally pending
 
-- Richer paid alternative-data adapters beyond current public/fallback feeds.
+- Live calibration of external-data weights against real paper/live outcomes.
 
 The remaining items require deeper data dependencies or live-trading calibration, so they should be delivered as focused PRs after the primitives are merged.

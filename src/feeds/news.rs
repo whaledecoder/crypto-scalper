@@ -5,6 +5,7 @@
 
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use std::time::Duration;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -46,10 +47,23 @@ pub struct NewsClient {
     client: Client,
     cryptopanic_key: Option<String>,
     rss_urls: Vec<String>,
+    cryptopanic_base_url: String,
 }
 
 impl NewsClient {
     pub fn new(cryptopanic_key: Option<String>, rss_urls: Vec<String>) -> Self {
+        Self::with_cryptopanic_base_url(
+            cryptopanic_key,
+            rss_urls,
+            "https://cryptopanic.com/api/v1/posts/",
+        )
+    }
+
+    pub fn with_cryptopanic_base_url(
+        cryptopanic_key: Option<String>,
+        rss_urls: Vec<String>,
+        cryptopanic_base_url: impl Into<String>,
+    ) -> Self {
         Self {
             client: Client::builder()
                 .timeout(Duration::from_secs(6))
@@ -58,6 +72,7 @@ impl NewsClient {
                 .unwrap_or_default(),
             cryptopanic_key,
             rss_urls,
+            cryptopanic_base_url: cryptopanic_base_url.into(),
         }
     }
 
@@ -102,44 +117,20 @@ impl NewsClient {
         currencies: &[&str],
     ) -> anyhow::Result<Vec<NewsItem>> {
         let curr = currencies.join(",");
-        let url = format!(
-            "https://cryptopanic.com/api/v1/posts/?auth_token={key}&currencies={curr}&public=true"
-        );
-        let body: serde_json::Value = self.client.get(&url).send().await?.json().await?;
-        let arr = body
-            .get("results")
-            .and_then(|v| v.as_array())
-            .cloned()
-            .unwrap_or_default();
-        Ok(arr
-            .into_iter()
-            .take(10)
-            .map(|post| {
-                let title = post
-                    .get("title")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_string();
-                let url = post
-                    .get("url")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_string();
-                let pub_at = post
-                    .get("published_at")
-                    .and_then(|v| v.as_str())
-                    .map(|s| s.to_string());
-                let score = keyword_sentiment(&title);
-                NewsItem {
-                    source: "cryptopanic".into(),
-                    title,
-                    url,
-                    published_at: pub_at,
-                    score,
-                    impact: classify_impact(score),
-                }
-            })
-            .collect())
+        let body: Value = self
+            .client
+            .get(&self.cryptopanic_base_url)
+            .query(&[
+                ("auth_token", key),
+                ("currencies", curr.as_str()),
+                ("public", "true"),
+            ])
+            .send()
+            .await?
+            .error_for_status()?
+            .json()
+            .await?;
+        Ok(parse_cryptopanic_items(&body, 10))
     }
 
     async fn fetch_rss(&self, url: &str) -> anyhow::Result<Vec<NewsItem>> {
@@ -168,6 +159,61 @@ impl NewsClient {
                 }
             })
             .collect())
+    }
+}
+
+fn parse_cryptopanic_items(body: &Value, limit: usize) -> Vec<NewsItem> {
+    body.get("results")
+        .and_then(|v| v.as_array())
+        .into_iter()
+        .flatten()
+        .take(limit)
+        .filter_map(parse_cryptopanic_item)
+        .collect()
+}
+
+fn parse_cryptopanic_item(post: &Value) -> Option<NewsItem> {
+    let title = post.get("title").and_then(|v| v.as_str())?;
+    if title.is_empty() {
+        return None;
+    }
+    let url = post
+        .get("url")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    let pub_at = post
+        .get("published_at")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+    let mut score = keyword_sentiment(title);
+    if let Some(votes) = post.get("votes") {
+        score = (score + cryptopanic_vote_score(votes)).clamp(-1.0, 1.0);
+    }
+    Some(NewsItem {
+        source: "cryptopanic".into(),
+        title: title.to_string(),
+        url,
+        published_at: pub_at,
+        score,
+        impact: classify_impact(score),
+    })
+}
+
+fn cryptopanic_vote_score(votes: &Value) -> f64 {
+    let positive = ["positive", "bullish"]
+        .iter()
+        .filter_map(|k| votes.get(k).and_then(|v| v.as_f64()))
+        .sum::<f64>();
+    let negative = ["negative", "bearish"]
+        .iter()
+        .filter_map(|k| votes.get(k).and_then(|v| v.as_f64()))
+        .sum::<f64>();
+    let total = positive + negative;
+    if total > 0.0 {
+        ((positive - negative) / total).clamp(-1.0, 1.0) * 0.5
+    } else {
+        0.0
     }
 }
 
@@ -240,5 +286,32 @@ mod tests {
         assert!(keyword_sentiment("BlackRock BTC ETF inflow surges") > 0.0);
         assert!(keyword_sentiment("SEC lawsuit hits exchange") < 0.0);
         assert!(keyword_sentiment("Bitcoin holds steady").abs() < 1e-9);
+    }
+
+    #[test]
+    fn parses_cryptopanic_votes_into_score() {
+        let payload = serde_json::json!({
+            "results": [{
+                "title": "BTC ETF rally",
+                "url": "https://example.com/post",
+                "published_at": "2026-01-01T00:00:00Z",
+                "votes": {"positive": 9, "negative": 1, "important": 20}
+            }]
+        });
+        let items = parse_cryptopanic_items(&payload, 10);
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].source, "cryptopanic");
+        assert!(items[0].score > 0.5);
+    }
+
+    #[test]
+    fn cryptopanic_vote_score_ignores_non_directional_votes() {
+        let votes = serde_json::json!({
+            "negative": 10,
+            "important": 50,
+            "liked": 50,
+            "toxic": 50
+        });
+        assert_eq!(cryptopanic_vote_score(&votes), -0.5);
     }
 }

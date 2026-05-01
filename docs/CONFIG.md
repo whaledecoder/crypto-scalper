@@ -174,8 +174,8 @@ size orders.
 
 | Key | Default | Meaning |
 |---|---|---|
-| `cryptopanic_api_key` | `""` | env `CRYPTOPANIC_API_KEY` |
-| `lunarcrush_api_key` | `""` | env `LUNARCRUSH_API_KEY` |
+| `cryptopanic_api_key` | `""` | env `CRYPTOPANIC_API_KEY`; optional news + vote sentiment |
+| `lunarcrush_api_key` | `""` | env `LUNARCRUSH_API_KEY`; optional social sentiment/volume |
 | `glassnode_api_key` | `""` | env `GLASSNODE_API_KEY`; optional BTC/ETH exchange inflow/outflow + SOPR |
 | `whalealert_api_key` | `""` | env `WHALE_ALERT_API_KEY`; optional BTC/ETH whale tx count |
 | `deribit_base_url` | `"https://www.deribit.com"` | public Deribit endpoint for BTC/ETH options IV skew |
@@ -184,7 +184,8 @@ size orders.
 Missing keys → that sub-feed silently emits an empty snapshot. Nothing
 crashes. Deribit options data uses public endpoints; unsupported symbols
 emit no options snapshot. Glassnode/Whale Alert requests are fail-soft and
-only populate fields when keys are configured.
+only populate fields when keys are configured. CryptoPanic/LunarCrush also
+fail soft; RSS/news fallback remains available without paid keys.
 
 ---
 
