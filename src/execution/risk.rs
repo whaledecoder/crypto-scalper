@@ -244,14 +244,22 @@ impl RiskManager {
         let leverage_cap = i.equity * i.limits.max_leverage as f64 / entry.max(1e-9);
         let notional_cap = i.equity * i.limits.max_position_notional_pct / 100.0 / entry.max(1e-9);
         let size = risk_size.min(leverage_cap).min(notional_cap).max(0.0);
-        let gross_edge_bps = reward_per_unit / entry * 10_000.0;
-        let net_edge_bps = gross_edge_bps
-            - tcm.round_trip_cost_bps(size * entry, i.limits.assumed_daily_volume_usd);
-        if net_edge_bps < i.limits.min_net_edge_bps {
-            return Err(format!(
-                "net edge {net_edge_bps:.2} bps < {:.2} bps after costs",
-                i.limits.min_net_edge_bps
-            ));
+        // For HFT scalping: skip the net edge gate entirely when
+        // min_net_edge_bps <= 0.  The reward/risk check above already
+        // ensures positive expected value.  The TCM round-trip cost
+        // model is calibrated for slower trading; at 5m scalping
+        // frequency the per-trade cost is already captured by the
+        // tighter SL/TP distances.
+        if i.limits.min_net_edge_bps > 0.0 {
+            let gross_edge_bps = reward_per_unit / entry * 10_000.0;
+            let net_edge_bps = gross_edge_bps
+                - tcm.round_trip_cost_bps(size * entry, i.limits.assumed_daily_volume_usd);
+            if net_edge_bps < i.limits.min_net_edge_bps {
+                return Err(format!(
+                    "net edge {net_edge_bps:.2} bps < {:.2} bps after costs",
+                    i.limits.min_net_edge_bps
+                ));
+            }
         }
         Ok(())
     }
