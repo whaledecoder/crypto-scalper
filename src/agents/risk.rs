@@ -22,6 +22,7 @@ use crate::data::Side;
 use crate::execution::tcm::TransactionCostModel;
 use crate::execution::RiskManager;
 use crate::learning::LearningPolicy;
+use crate::quant::QuantEngine;
 use parking_lot::Mutex;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -37,6 +38,9 @@ pub struct RiskAgentConfig {
     /// 0.05%). Default 0.001 = 0.1%.
     pub funding_block_threshold: f64,
     pub tcm: TransactionCostModel,
+    /// Base risk per trade % — passed to the quant engine for Kelly
+    /// comparison.  Default 0.5%.
+    pub base_risk_pct: f64,
 }
 
 impl Default for RiskAgentConfig {
@@ -56,6 +60,7 @@ impl Default for RiskAgentConfig {
                 avg_slippage_bps: 2.0,
                 market_impact_bps: 1.0,
             },
+            base_risk_pct: 0.5,
         }
     }
 }
@@ -65,6 +70,7 @@ pub fn spawn(
     risk: Arc<RiskManager>,
     policy: LearningPolicy,
     cfg: RiskAgentConfig,
+    quant_engine: Option<Arc<QuantEngine>>,
 ) -> JoinHandle<()> {
     let mut rx = bus.subscribe();
     let survival: Arc<Mutex<Option<SurvivalState>>> = Arc::new(Mutex::new(None));
@@ -239,7 +245,39 @@ pub fn spawn(
                     // RiskManager.calculate_size already multiplies by
                     // the SurvivalAgent-controlled size_multiplier.
                     let base_size = risk.calculate_size(signal.entry, signal.stop_loss);
-                    let size = base_size * verdict.size_multiplier;
+
+                    // Apply quant engine sizing (Kelly, vol-target, VaR, Kalman)
+                    let (size, _quant_reason) = if let Some(ref qe) = quant_engine {
+                        let qr = qe.compute_sizing(
+                            &signal.symbol,
+                            signal.strategy.as_str(),
+                            signal.side,
+                            signal.ta_confidence,
+                            signal.entry,
+                            signal.stop_loss,
+                            risk.equity(),
+                            cfg.base_risk_pct,
+                        );
+                        if qr.var_rejected {
+                            bus.publish(AgentEvent::RiskVerdict(RiskVerdictMsg {
+                                signal: signal.clone(),
+                                regime,
+                                outcome: RiskOutcome::Blocked,
+                                size: 0.0,
+                                size_multiplier: verdict.size_multiplier,
+                                effective_ta_threshold,
+                                effective_llm_floor: llm_floor,
+                                matched_lessons: verdict.matched_lessons,
+                                reason: Some(format!("quant VaR cap: {}", qr.reason)),
+                            }));
+                            continue;
+                        }
+                        let adjusted = base_size * verdict.size_multiplier * qr.size_multiplier;
+                        (adjusted, qr.reason)
+                    } else {
+                        (base_size * verdict.size_multiplier, String::new())
+                    };
+
                     if size <= 0.0 {
                         bus.publish(AgentEvent::RiskVerdict(RiskVerdictMsg {
                             signal: signal.clone(),

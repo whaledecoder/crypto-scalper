@@ -32,6 +32,7 @@ use crypto_scalper::{
         logger::TradeJournal, spawn_dashboard_server, DashboardState, MetricsState,
         TelegramNotifier,
     },
+    quant::{QuantConfig, QuantEngine},
     research::{reports_to_json, reports_to_markdown, ResearchReport},
     strategy::state::{StrategyName, SymbolState},
 };
@@ -423,13 +424,33 @@ async fn run_agents(cfg: Config) -> Result<()> {
         cfg.pairs.symbols.clone(),
         60,
     );
+    // --- Quant Engine (Kelly, vol-target, VaR, IC, Kalman) ---
+    let quant_engine = Arc::new(QuantEngine::new(QuantConfig {
+        enabled: cfg.quant.enabled,
+        kelly_cap: cfg.quant.kelly_cap,
+        kelly_min_trades: cfg.quant.kelly_min_trades,
+        target_vol_annual: cfg.quant.target_vol_annual,
+        max_vol_multiplier: cfg.quant.max_vol_multiplier,
+        vol_window: cfg.quant.vol_window,
+        var_confidence: cfg.quant.var_confidence,
+        max_var_pct: cfg.quant.max_var_pct,
+        ic_window: cfg.quant.ic_window,
+        ic_min_abs: cfg.quant.ic_min_abs,
+        ic_max_boost: cfg.quant.ic_max_boost,
+        kalman_process_noise: cfg.quant.kalman_process_noise,
+        kalman_measurement_noise: cfg.quant.kalman_measurement_noise,
+        kalman_min_velocity_bps: cfg.quant.kalman_min_velocity_bps,
+    }));
+
     let _signal = crypto_scalper::agents::signal::spawn(
         bus.clone(),
         Arc::clone(&states),
         active.clone(),
         cfg.schedule.clone(),
         cfg.advanced_alpha.clone(),
+        Some(Arc::clone(&quant_engine)),
     );
+
     let _risk = crypto_scalper::agents::risk::spawn(
         bus.clone(),
         Arc::clone(&risk),
@@ -445,6 +466,7 @@ async fn run_agents(cfg: Config) -> Result<()> {
             },
             ..RiskAgentConfig::default()
         },
+        Some(Arc::clone(&quant_engine)),
     );
     let _brain = crypto_scalper::agents::brain::spawn(
         bus.clone(),
@@ -543,6 +565,7 @@ async fn run_agents(cfg: Config) -> Result<()> {
             ..LessonConfig::default()
         },
         300,
+        Some(Arc::clone(&quant_engine)),
     );
 
     let _survival = crypto_scalper::agents::survival::spawn(SurvivalAgentDeps {

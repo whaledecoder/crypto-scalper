@@ -149,3 +149,21 @@ daily_pnl_ratchet_pct              = 2.0
 telegram_commands_enabled = false
 allowed_user_ids          = []
 poll_secs                 = 3
+
+[quant]
+# Quantitative engine — Kelly, vol-targeting, VaR, IC, Kalman.
+# This replaces fixed % sizing with mathematically optimal position sizing.
+enabled                = true
+kelly_cap              = 0.25     # Max Kelly fraction (half-Kelly = conservative)
+kelly_min_trades       = 20       # Min closed trades before Kelly activates
+target_vol_annual      = 0.15     # 15% annualized vol target
+max_vol_multiplier     = 2.0      # Max vol-target scale factor
+vol_window             = 60       # Candles for realized vol calculation
+var_confidence         = 0.95     # 95% VaR confidence level
+max_var_pct            = 0.03     # Max 3% of equity at risk per trade (CVaR)
+ic_window              = 50       # Observations for rolling IC
+ic_min_abs             = 0.05     # Min |IC| for confidence adjustment
+ic_max_boost           = 10       # Max +/- confidence points from IC
+kalman_process_noise   = 0.01     # Kalman filter Q (lower = smoother)
+kalman_measurement_noise = 1.0   # Kalman filter R (higher = less reactive)
+kalman_min_velocity_bps = 3.0    # Min |velocity| in bps for trend signal
