@@ -103,7 +103,12 @@ impl Exchange for PaperExchange {
     fn fetch_equity_usd<'a>(
         &'a self,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<f64>> + Send + 'a>> {
-        Box::pin(async move { Ok(*self.equity_usd.lock()) })
+        // Return 0 so the SurvivalAgent reconciliation loop skips the
+        // `risk.set_equity()` call. In paper mode the RiskManager's own
+        // `on_position_closed(pnl)` is the authoritative equity source;
+        // overwriting it with the exchange's stale initial balance would
+        // cause a false drawdown spike after every profitable trade.
+        Box::pin(async move { Ok(0.0) })
     }
 
     fn fetch_open_positions<'a>(
