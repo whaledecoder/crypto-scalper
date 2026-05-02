@@ -116,9 +116,9 @@ impl PositionBook {
             }
             let reason = match p.side {
                 Side::Long => {
-                    if price <= p.stop_loss {
+                    if p.stop_loss > 0.0 && price <= p.stop_loss {
                         Some(PositionExitReason::StopLoss)
-                    } else if price >= p.take_profit {
+                    } else if p.take_profit > 0.0 && price >= p.take_profit {
                         Some(PositionExitReason::TakeProfit)
                     } else if p.trailing_activated
                         && price <= p.peak_price - (p.peak_price - p.entry_price) * 0.5
@@ -134,9 +134,9 @@ impl PositionBook {
                     }
                 }
                 Side::Short => {
-                    if price >= p.stop_loss {
+                    if p.stop_loss > 0.0 && price >= p.stop_loss {
                         Some(PositionExitReason::StopLoss)
-                    } else if price <= p.take_profit {
+                    } else if p.take_profit > 0.0 && price <= p.take_profit {
                         Some(PositionExitReason::TakeProfit)
                     } else if p.trailing_activated
                         && price >= p.trough_price + (p.entry_price - p.trough_price) * 0.5

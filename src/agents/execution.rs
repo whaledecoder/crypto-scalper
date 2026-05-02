@@ -139,6 +139,15 @@ pub fn spawn(deps: ExecutionAgentDeps) -> JoinHandle<()> {
                         );
                         continue;
                     }
+                    if v.proposal.entry <= 0.0 || v.proposal.size <= 0.0 {
+                        warn!(
+                            symbol = %v.proposal.symbol,
+                            entry = v.proposal.entry,
+                            size = v.proposal.size,
+                            "execution: invalid proposal (entry/size <= 0) — discarding"
+                        );
+                        continue;
+                    }
                     // Survival gate.
                     if honor_survival {
                         if let Some(s) = survival.lock().as_ref() {
@@ -160,12 +169,28 @@ pub fn spawn(deps: ExecutionAgentDeps) -> JoinHandle<()> {
                     let req = build_entry_request(&v);
                     match exchange.place_order(&req).await {
                         Ok(ack) => {
-                            risk.on_position_opened();
                             let fill_price = if ack.avg_fill_price > 0.0 {
                                 ack.avg_fill_price
                             } else {
                                 req.price.unwrap_or(0.0)
                             };
+                            if fill_price <= 0.0 {
+                                warn!(
+                                    symbol = %req.symbol,
+                                    "execution: fill_price is zero — discarding ghost position"
+                                );
+                                continue;
+                            }
+                            risk.on_position_opened();
+                            info!(
+                                symbol = %req.symbol,
+                                side  = %format!("{:?}", req.side),
+                                entry = %format!("{:.4}", fill_price),
+                                sl    = %format!("{:.4}", req.stop_loss),
+                                tp    = %format!("{:.4}", req.take_profit),
+                                size  = %format!("{:.6}", req.size),
+                                "execution: position opened"
+                            );
                             let pos = Position {
                                 client_id: req.client_id.clone(),
                                 symbol: req.symbol.clone(),
