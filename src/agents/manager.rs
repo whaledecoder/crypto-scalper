@@ -209,7 +209,7 @@ fn build_proposal(brain: &BrainOutcome) -> ManagerProposal {
         side: signal.side,
         strategy: signal.strategy.as_str().to_string(),
         regime: brain.regime.as_str().to_string(),
-        entry: brain.decision.entry_price.unwrap_or(signal.entry),
+        entry: brain.decision.entry_price.filter(|&p| p > 0.0).unwrap_or(signal.entry),
         stop_loss: signal.stop_loss,
         take_profit: signal.take_profit,
         size: brain.risk.size,
