@@ -42,8 +42,13 @@ pub struct RiskAgentConfig {
 impl Default for RiskAgentConfig {
     fn default() -> Self {
         Self {
+            // Lower thresholds for HFT scalping — the strategies already
+            // score conservatively (62-68 base), so a 60 TA threshold
+            // lets most valid signals through.
             base_min_ta_threshold: 60,
-            base_min_llm_floor: 70,
+            // LLM floor: accept signals where LLM confidence is >= 50.
+            // The brain LLM prompt now defaults to GO for composite >= 50.
+            base_min_llm_floor: 50,
             funding_block_threshold: 0.001,
             tcm: TransactionCostModel {
                 taker_fee_bps: 4.0,
