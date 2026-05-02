@@ -22,11 +22,11 @@ pub struct PaperExchange {
 }
 
 impl PaperExchange {
-    pub fn new(fee_bps: f64) -> Self {
+    pub fn new(fee_bps: f64, equity_usd: f64) -> Self {
         Self {
             fee_bps,
             orders: Mutex::new(HashMap::new()),
-            equity_usd: Mutex::new(0.0),
+            equity_usd: Mutex::new(equity_usd),
         }
     }
 

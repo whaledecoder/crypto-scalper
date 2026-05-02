@@ -36,10 +36,18 @@ pub fn select_strategies(active: &[StrategyName], regime: Regime) -> Vec<Strateg
         Regime::TrendingBullish | Regime::TrendingBearish => {
             &[StrategyName::EmaRibbon, StrategyName::Momentum]
         }
-        Regime::Ranging => &[StrategyName::MeanReversion, StrategyName::VwapScalp],
+        Regime::Ranging => &[
+            StrategyName::MeanReversion,
+            StrategyName::VwapScalp,
+            StrategyName::EmaRibbon,
+        ],
         Regime::Volatile => &[StrategyName::Squeeze, StrategyName::Momentum],
         Regime::Squeeze => &[StrategyName::Squeeze],
-        Regime::Unknown => &[StrategyName::VwapScalp, StrategyName::MeanReversion],
+        Regime::Unknown => &[
+            StrategyName::VwapScalp,
+            StrategyName::MeanReversion,
+            StrategyName::EmaRibbon,
+        ],
     };
     preferred
         .iter()

@@ -49,6 +49,7 @@ pub struct ManagerAgentConfig {
     /// skip the manager call to save tokens.)
     pub fast_approve_min_conf: u8,
     pub fail_closed_without_llm: bool,
+    pub fail_open_on_error: bool,
 }
 
 fn manager_off_action(
@@ -78,6 +79,7 @@ impl Default for ManagerAgentConfig {
             http_app_title: None,
             fast_approve_min_conf: 90,
             fail_closed_without_llm: false,
+            fail_open_on_error: false,
         }
     }
 }
@@ -161,15 +163,20 @@ pub fn spawn(
                         {
                             Ok(a) => a,
                             Err(e) => {
-                                // Fail-CLOSED: if the manager LLM is
-                                // unreachable, refuse the trade.
-                                // Survival > availability.
-                                warn!(
-                                    error = %e,
-                                    "manager LLM failed — failing CLOSED with Veto"
-                                );
-                                ManagerAction::Veto {
-                                    reason: "manager LLM unavailable; failing closed".into(),
+                                if cfg.fail_open_on_error && !cfg.fail_closed_without_llm {
+                                    warn!(
+                                        error = %e,
+                                        "manager LLM failed — approving per fail-open config"
+                                    );
+                                    ManagerAction::Approve
+                                } else {
+                                    warn!(
+                                        error = %e,
+                                        "manager LLM failed — failing CLOSED with Veto"
+                                    );
+                                    ManagerAction::Veto {
+                                        reason: "manager LLM unavailable; failing closed".into(),
+                                    }
                                 }
                             }
                         }

@@ -149,6 +149,8 @@ pub struct ManagerCfg {
     pub http_referer: String,
     #[serde(default)]
     pub http_app_title: String,
+    #[serde(default)]
+    pub fail_open_on_error: bool,
 }
 
 fn default_manager_provider() -> String {
@@ -183,6 +185,7 @@ impl Default for ManagerCfg {
             fast_approve_min_conf: default_manager_fast_approve(),
             http_referer: String::new(),
             http_app_title: String::new(),
+            fail_open_on_error: false,
         }
     }
 }

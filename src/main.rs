@@ -220,7 +220,7 @@ async fn run_agents(cfg: Config) -> Result<()> {
         ))
     } else {
         info!("paper/dry-run mode — simulated exchange");
-        Arc::new(PaperExchange::new(2.0))
+        Arc::new(PaperExchange::new(2.0, cfg.risk.equity_usd))
     };
 
     // --- Risk manager (shared between RiskAgent + ExecutionAgent) ---
@@ -467,6 +467,7 @@ async fn run_agents(cfg: Config) -> Result<()> {
             http_app_title: Some(cfg.manager.http_app_title.clone()).filter(|s| !s.is_empty()),
             fast_approve_min_conf: cfg.manager.fast_approve_min_conf,
             fail_closed_without_llm: cfg.mode.run_mode == "live" && !cfg.mode.dry_run,
+            fail_open_on_error: cfg.manager.fail_open_on_error,
         },
         policy.clone(),
         Arc::clone(&feeds_cache),

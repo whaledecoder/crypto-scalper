@@ -11,6 +11,11 @@ timeframes = ["1m"]
 [strategy]
 min_ta_confidence = 55
 
+[llm]
+timeout_secs = 20
+min_confidence = 60
+fallback_ta_threshold = 60
+
 [risk]
 risk_per_trade_pct = 0.75
 max_open_positions = 3
@@ -19,10 +24,19 @@ max_drawdown_pct = 12.0
 max_spread_pct = 0.08
 min_reward_risk = 1.05
 min_net_edge_bps = 0.0
+max_position_notional_pct = 100.0
+assumed_daily_volume_usd = 1000000000000.0
 equity_usd = 5000.0
 
+[backtest]
+slippage_bps = 0.0
+market_impact_bps = 0.0
+
 [manager]
-enabled = false
+enabled = true
+timeout_secs = 20
+fast_approve_min_conf = 60
+fail_open_on_error = true
 
 [survival]
 loss_streak_short = 3

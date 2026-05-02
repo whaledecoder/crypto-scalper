@@ -77,9 +77,27 @@ pub async fn fetch_klines(
     };
 
     let url = format!("{}{}", rest_base_url.trim_end_matches('/'), path);
+
+    let raw: Vec<RawKline> =
+        fetch_klines_from(client, rest_base_url, path, symbol, timeframe, limit)
+            .await
+            .with_context(|| format!("primary {url}"))?;
+
+    candles_from_raw(raw)
+}
+
+async fn fetch_klines_from(
+    client: &Client,
+    rest_base_url: &str,
+    path: &str,
+    symbol: &str,
+    timeframe: &Timeframe,
+    limit: u32,
+) -> Result<Vec<RawKline>> {
+    let url = format!("{}{}", rest_base_url.trim_end_matches('/'), path);
     let interval = timeframe.as_str();
 
-    let raw: Vec<RawKline> = client
+    client
         .get(&url)
         .query(&[
             ("symbol", symbol),
@@ -93,8 +111,10 @@ pub async fn fetch_klines(
         .context("kline http error")?
         .json()
         .await
-        .context("kline json parse")?;
+        .context("kline json parse")
+}
 
+fn candles_from_raw(raw: Vec<RawKline>) -> Result<Vec<Candle>> {
     let mut candles = Vec::with_capacity(raw.len());
     for r in raw {
         match r.into_candle() {
@@ -113,6 +133,41 @@ pub async fn fetch_klines(
     }
 
     Ok(candles)
+}
+
+async fn fetch_bootstrap_klines(
+    client: &Client,
+    rest_base_url: &str,
+    symbol: &str,
+    timeframe: &Timeframe,
+    limit: u32,
+) -> Result<Vec<Candle>> {
+    match fetch_klines(client, rest_base_url, symbol, timeframe, limit).await {
+        Ok(candles) => return Ok(candles),
+        Err(primary) => {
+            warn!(symbol = %symbol, error = %primary, "primary kline bootstrap failed");
+        }
+    }
+
+    for (base, path) in [
+        ("https://data-api.binance.vision", "/api/v3/klines"),
+        ("https://testnet.binancefuture.com", "/fapi/v1/klines"),
+    ] {
+        match fetch_klines_from(client, base, path, symbol, timeframe, limit)
+            .await
+            .and_then(candles_from_raw)
+        {
+            Ok(candles) => {
+                info!(symbol = %symbol, base = %base, "kline bootstrap fallback succeeded");
+                return Ok(candles);
+            }
+            Err(e) => {
+                warn!(symbol = %symbol, base = %base, error = %e, "kline bootstrap fallback failed");
+            }
+        }
+    }
+
+    anyhow::bail!("all kline bootstrap sources failed")
 }
 
 /// Pre-seed all SymbolState indicators from historical klines.
@@ -134,7 +189,9 @@ pub async fn bootstrap_states(
     for symbol in &symbols {
         info!(symbol = %symbol, candles = BOOTSTRAP_LIMIT, "bootstrapping historical klines");
 
-        match fetch_klines(&client, rest_base_url, symbol, timeframe, BOOTSTRAP_LIMIT).await {
+        match fetch_bootstrap_klines(&client, rest_base_url, symbol, timeframe, BOOTSTRAP_LIMIT)
+            .await
+        {
             Ok(candles) if candles.is_empty() => {
                 warn!(symbol = %symbol, "bootstrap returned 0 candles — indicators will warm up live");
             }
