@@ -49,6 +49,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 hmac = "0.12"
 sha2 = "0.10"
 hex = "0.4"
+openssl = { version = "0.10", features = ["vendored"] }
 
 # Error handling
 anyhow = "1"

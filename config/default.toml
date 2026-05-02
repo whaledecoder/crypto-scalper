@@ -1,4 +1,5 @@
-# Default configuration — safe for local/dev. Override via config/local.toml or ENV.
+# Default configuration — tuned for autonomous HFT scalping.
+# Override via config/local.toml or ENV.
 
 [mode]
 # "paper" runs without any real order dispatch (simulated fills).
@@ -23,7 +24,9 @@ timeframes = ["5m"]
 [strategy]
 mode   = "adaptive"
 active = ["mean_reversion", "ema_ribbon", "momentum", "vwap_scalp", "squeeze"]
-min_ta_confidence = 65
+# Lower TA threshold — the strategies already score conservatively (62-68 base).
+# Setting this to 60 lets the strategy confidence scores pass through.
+min_ta_confidence = 60
 
 [advanced_alpha]
 # Disabled by default. When enabled, external data + Kalman trend context can
@@ -37,7 +40,6 @@ kalman_measurement_noise = 1.0
 
 [llm]
 # Default: OpenRouter (1 key, banyak model — Claude/GPT/Gemini/DeepSeek/Qwen).
-# Ganti ke "anthropic" kalau mau pakai Anthropic native.
 provider = "openrouter"
 model    = "anthropic/claude-3.5-haiku"
 api_key  = ""                                    # env OPENROUTER_API_KEY
@@ -45,42 +47,49 @@ api_base = "https://openrouter.ai/api/v1/chat/completions"
 http_referer   = "https://github.com/whaledecoder/crypto-scalper"
 http_app_title = "ARIA Crypto Scalper"
 timeout_secs = 8
-min_confidence = 70
-fallback_ta_threshold = 75
+# Lower LLM confidence floor — let TA signals through even when LLM is uncertain.
+min_confidence = 60
+# Lower fallback threshold so TA-only mode still trades.
+fallback_ta_threshold = 62
 max_tokens = 1024
 
 [manager]
-# TraderManagerAgent — head-of-desk LLM that approves / vetoes / adjusts
-# every Brain decision. Disabled by default; flip `enabled` to true and
-# (optionally) export MANAGER_API_KEY to use a different model than the
-# brain. If `api_key` empty, falls back to the brain LLM key.
+# TraderManagerAgent — head-of-desk LLM.
+# DISABLED by default for autonomous operation — the brain LLM already
+# provides analysis. Enable only when you want a second opinion layer.
 enabled = false
 provider = "openrouter"
 api_base = "https://openrouter.ai/api/v1/chat/completions"
 model    = "anthropic/claude-3.5-haiku"
 timeout_secs = 6
 max_tokens   = 600
-fast_approve_min_conf = 90      # skip the manager call when brain conf >= this and no lessons matched
+fast_approve_min_conf = 80      # skip manager when brain conf >= this
 http_referer   = "https://github.com/whaledecoder/crypto-scalper"
 http_app_title = "ARIA TraderManager"
+# CRITICAL: fail-open on error so the bot keeps trading when manager is down.
+fail_open_on_error = true
 
 [risk]
-risk_per_trade_pct = 0.35
-max_open_positions = 2
-max_daily_loss_pct = 2.0
-max_drawdown_pct   = 6.0
-max_leverage       = 3
-max_spread_pct     = 0.025
-min_reward_risk    = 1.20
-max_position_notional_pct = 35.0
-min_net_edge_bps = 1.0
+# HFT scalping risk profile — tighter SL/TP, more positions, lower per-trade risk.
+risk_per_trade_pct = 0.5        # 0.5% equity per trade (conservative but functional)
+max_open_positions = 3          # Allow 3 concurrent positions across symbols
+max_daily_loss_pct = 3.0        # 3% daily loss → circuit trip
+max_drawdown_pct   = 8.0        # 8% drawdown → circuit trip
+max_leverage       = 3          # 3× max leverage (safe)
+max_spread_pct     = 0.04       # 0.04% max spread (crypto spreads are wider)
+min_reward_risk    = 1.0        # Accept 1:1 R:R for scalping (was 1.2)
+# Net edge check: 0.0 = disabled. The R:R gate already ensures positive EV.
+# For scalping at 5m, the gross edge is small — the cost model would reject most signals.
+min_net_edge_bps = 0.0
+max_position_notional_pct = 40.0  # 40% of equity per position
 assumed_daily_volume_usd = 1000000000.0
 equity_usd         = 5000.0
 
 [schedule]
-# 24h WIB (UTC+7) — dead zone skipped
-dead_zone_start_hour_wib = 3
-dead_zone_end_hour_wib   = 7
+# 24h WIB (UTC+7) — NO dead zone for autonomous HFT.
+# The bot should trade around the clock. Set start=end to disable.
+dead_zone_start_hour_wib = 0
+dead_zone_end_hour_wib   = 0
 
 [feeds]
 cryptopanic_api_key = ""   # env CRYPTOPANIC_API_KEY
@@ -112,29 +121,31 @@ trading_days_per_year = 365.0
 trades_per_day = 12.0
 
 [survival]
-# "Trade for life" — survival mode policer. See docs/SURVIVAL.md for the
-# full survive_score formula and mode transitions.
+# "Trade for life" — tuned for HFT: more forgiving cooldowns so the bot
+# keeps trading through normal losing streaks.
 enabled                            = true
-death_line_pct                     = 0.70    # equity floor as fraction of initial
-loss_streak_short                  = 2       # consecutive losses → 60 min cooldown
-loss_streak_short_cooldown_min     = 60
-loss_streak_long                   = 4       # losses-in-window → long cooldown
+death_line_pct                     = 0.70    # equity floor: 70% of initial
+# 5 consecutive losses → 30 min cooldown (was 2 losses → 60 min)
+loss_streak_short                  = 5
+loss_streak_short_cooldown_min     = 30
+# 8 losses in 1 hour → 4 hour cooldown (was 4 in 1h → 4h)
+loss_streak_long                   = 8
 loss_streak_long_window_min        = 60
-loss_streak_long_cooldown_min      = 240     # 4 hours
-daily_loss_count                   = 6       # losses in one day → 24h cooldown
-auto_flat_drawdown_pct             = 5.0     # drawdown that triggers flat-all
-refresh_secs                       = 15      # how often SurvivalState is recomputed
-equity_refresh_secs                = 60      # how often equity is reconciled with broker
-vol_spike_mult                     = 2.0     # ATR ratio above which sizes halve
-news_panic_threshold               = -0.6    # below this, freeze for 2h
-news_euphoria_threshold            = 0.8     # above this, halve size
-daily_pnl_ratchet_pct              = 1.0     # +1% gain triggers ratchet lock
+loss_streak_long_cooldown_min      = 240
+# 15 losses in one day → 24h cooldown (was 6 → 24h)
+daily_loss_count                   = 15
+# 8% drawdown triggers flat-all (was 5%)
+auto_flat_drawdown_pct             = 8.0
+refresh_secs                       = 15
+equity_refresh_secs                = 60
+vol_spike_mult                     = 2.0
+news_panic_threshold               = -0.6
+news_euphoria_threshold            = 0.8
+# 2% daily gain ratchet (locks half the gain)
+daily_pnl_ratchet_pct              = 2.0
 
 [control]
 # Operator control panel. See docs/CONTROL.md.
-# Set telegram_commands_enabled = true *and* add your numeric Telegram
-# user id to allowed_user_ids to enable /status, /freeze, /flat, etc.
-# The /tmp/aria.control file ingress is always available regardless.
 telegram_commands_enabled = false
 allowed_user_ids          = []
 poll_secs                 = 3

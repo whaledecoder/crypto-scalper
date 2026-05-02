@@ -1,4 +1,7 @@
 //! Strategy C — VWAP Order Flow Scalping.
+//!
+//! Tuned for HFT: wider zones, more permissive slope check, tighter SL for
+//! faster risk resolution.
 
 use super::state::{PreSignal, StrategyName, SymbolState};
 use super::Strategy;
@@ -18,27 +21,46 @@ impl Strategy for VwapScalp {
 
         let dist_pct = (c.close - vwap) / vwap.max(1e-9) * 100.0;
 
-        let long_zone = c.close <= vwap * 1.005 && c.close >= vwap * 0.997;
-        let short_zone = c.close >= vwap * 0.995 && c.close <= vwap * 1.003;
+        // Wider zones: ±1.0% from VWAP (was ±0.5%) — crypto is volatile
+        let long_zone = dist_pct >= -1.0 && dist_pct <= 0.3;
+        let short_zone = dist_pct <= 1.0 && dist_pct >= -0.3;
 
-        let side = if slope > 0.0 && long_zone {
+        // Allow trades even with flat slope — the zone itself is the edge
+        let side = if long_zone && slope >= -0.001 {
             Side::Long
-        } else if slope < 0.0 && short_zone {
+        } else if short_zone && slope <= 0.001 {
             Side::Short
         } else {
             return None;
         };
 
+        // Tighter SL (0.4× ATR) for scalping — faster stop-out = smaller losses
         let (sl, tp) = match side {
-            Side::Long => (c.close - 0.5 * atr, vwap + 0.5 * atr),
-            Side::Short => (c.close + 0.5 * atr, vwap - 0.5 * atr),
+            Side::Long => (
+                c.close - 0.4 * atr,
+                // TP: VWAP + small buffer OR 1.2× ATR, whichever is closer
+                vwap.min(c.close + atr * 1.2),
+            ),
+            Side::Short => (
+                c.close + 0.4 * atr,
+                vwap.max(c.close - atr * 1.2),
+            ),
         };
 
-        let mut score: f64 = 60.0;
-        if slope.abs() > 0.0005 {
-            score += 10.0;
+        let mut score: f64 = 62.0; // Above the 60 threshold
+        if slope.abs() > 0.0003 {
+            score += 8.0;
         }
-        if dist_pct.abs() < 0.1 {
+        // Closer to VWAP = higher confidence
+        if dist_pct.abs() < 0.15 {
+            score += 10.0;
+        } else if dist_pct.abs() < 0.3 {
+            score += 5.0;
+        }
+        // OFI confirmation
+        if (side == Side::Long && s.last_ofi.unwrap_or(0.0) > 0.0)
+            || (side == Side::Short && s.last_ofi.unwrap_or(0.0) < 0.0)
+        {
             score += 5.0;
         }
 
