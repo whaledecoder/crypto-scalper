@@ -6,10 +6,11 @@ run_mode = "paper"
 dry_run = true
 
 [pairs]
-timeframes = ["1m"]
+timeframes = ["1m", "5m", "15m"]
 
 [strategy]
 min_ta_confidence = 55
+paper_scout_enabled = true
 
 [llm]
 timeout_secs = 20

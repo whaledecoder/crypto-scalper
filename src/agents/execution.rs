@@ -14,18 +14,21 @@ use crate::agents::messages::{
 };
 use crate::agents::MessageBus;
 use crate::data::Side;
+use crate::execution::limit_order::plan_limit_order;
+use crate::execution::quality::{ExecutionQuality, TradeQualityRecord};
 use crate::execution::{
     orders::OrderType, Exchange, OrderRequest, Position, PositionBook, PositionConfig,
     PositionExitReason, RiskManager,
 };
-use crate::execution::quality::{ExecutionQuality, TradeQualityRecord};
-use crate::execution::limit_order::plan_limit_order;
 use chrono::Utc;
 use parking_lot::Mutex as PlMutex;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::task::JoinHandle;
 use tracing::{info, warn};
+
+type BookTop = (f64, f64, f64, f64);
+type SharedMap<T> = Arc<PlMutex<HashMap<String, T>>>;
 
 pub struct ExecutionAgentDeps {
     pub bus: MessageBus,
@@ -51,15 +54,15 @@ pub fn spawn(deps: ExecutionAgentDeps) -> JoinHandle<()> {
     let mut rx = bus.subscribe();
     let bus_for_close = bus.clone();
     let survival = Arc::new(PlMutex::new(None::<SurvivalState>));
-    let last_marks: Arc<PlMutex<HashMap<String, f64>>> = Arc::new(PlMutex::new(HashMap::new()));
-    let last_books: Arc<PlMutex<HashMap<String, (f64, f64, f64, f64)>>> = Arc::new(PlMutex::new(HashMap::new()));
+    let last_marks: SharedMap<f64> = Arc::new(PlMutex::new(HashMap::new()));
+    let last_books: SharedMap<BookTop> = Arc::new(PlMutex::new(HashMap::new()));
     let exec_quality = Arc::new(PlMutex::new(ExecutionQuality::default()));
-    let decision_prices: Arc<PlMutex<HashMap<String, f64>>> = Arc::new(PlMutex::new(HashMap::new()));
+    let decision_prices: SharedMap<f64> = Arc::new(PlMutex::new(HashMap::new()));
     let pos_cfg = PositionConfig {
-        max_hold_secs: 1800,   // 30 min max hold for scalping
-        trail_atr_mult: 0.5,   // Trail at 0.5× ATR
-        trail_activate_r: 1.0, // Activate trailing at 1R profit
-        breakeven_r: 0.5,      // Move SL to entry at 0.5R profit
+        max_hold_secs: 1800,       // 30 min max hold for scalping
+        trail_atr_mult: 0.5,       // Trail at 0.5× ATR
+        trail_activate_r: 1.0,     // Activate trailing at 1R profit
+        breakeven_r: 0.5,          // Move SL to entry at 0.5R profit
         partial_tp_enabled: false, // Disabled — broker handles TP
         partial_tp_r: 1.0,
     };
@@ -82,7 +85,9 @@ pub fn spawn(deps: ExecutionAgentDeps) -> JoinHandle<()> {
                         let _ = exchange.cancel_all(&pos.symbol).await;
                         let pnl_pct = if pos.entry_price > 0.0 {
                             (trade.price - pos.entry_price) / pos.entry_price * 100.0
-                        } else { 0.0 };
+                        } else {
+                            0.0
+                        };
                         info!(
                             symbol  = %pos.symbol,
                             side    = %pos.side.as_str(),
@@ -115,7 +120,9 @@ pub fn spawn(deps: ExecutionAgentDeps) -> JoinHandle<()> {
                     best_ask,
                     ask_qty,
                 } => {
-                    last_books.lock().insert(symbol, (best_bid, bid_qty, best_ask, ask_qty));
+                    last_books
+                        .lock()
+                        .insert(symbol, (best_bid, bid_qty, best_ask, ask_qty));
                 }
                 AgentEvent::SurvivalUpdated(s) => {
                     *survival.lock() = Some(s);
@@ -157,7 +164,9 @@ pub fn spawn(deps: ExecutionAgentDeps) -> JoinHandle<()> {
                         if let Some(closed) = book.close_by_id(&pos.client_id) {
                             let pnl_pct = if closed.entry_price > 0.0 {
                                 (mark - closed.entry_price) / closed.entry_price * 100.0
-                            } else { 0.0 };
+                            } else {
+                                0.0
+                            };
                             info!(
                                 symbol  = %closed.symbol,
                                 side    = %closed.side.as_str(),
@@ -221,10 +230,9 @@ pub fn spawn(deps: ExecutionAgentDeps) -> JoinHandle<()> {
                     }
 
                     // Record decision price for execution quality tracking
-                    decision_prices.lock().insert(
-                        v.proposal.symbol.clone(),
-                        v.proposal.entry,
-                    );
+                    decision_prices
+                        .lock()
+                        .insert(v.proposal.symbol.clone(), v.proposal.entry);
 
                     let req = build_entry_request(&v);
 
@@ -285,7 +293,11 @@ pub fn spawn(deps: ExecutionAgentDeps) -> JoinHandle<()> {
 
                             // Record execution quality
                             if let Some(decision_px) = decision_prices.lock().remove(&req.symbol) {
-                                let arrival_px = last_marks.lock().get(&req.symbol).copied().unwrap_or(fill_price);
+                                let arrival_px = last_marks
+                                    .lock()
+                                    .get(&req.symbol)
+                                    .copied()
+                                    .unwrap_or(fill_price);
                                 exec_quality.lock().record(TradeQualityRecord {
                                     symbol: req.symbol.clone(),
                                     decision_price: decision_px,

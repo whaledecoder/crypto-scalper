@@ -4,7 +4,7 @@
 
 use crate::agents::messages::{AgentEvent, AgentId};
 use crate::agents::MessageBus;
-use crate::data::{ws_client::WsClient, OhlcvBuilder, WsEvent};
+use crate::data::{ws_client::WsClient, OhlcvBuilder, Timeframe, WsEvent};
 use chrono::Utc;
 use std::collections::HashMap;
 use tokio::sync::mpsc;
@@ -14,7 +14,7 @@ use tracing::{info, warn};
 pub struct DataAgentConfig {
     pub ws_base_url: String,
     pub symbols: Vec<String>,
-    pub interval_secs: i64,
+    pub timeframes: Vec<Timeframe>,
 }
 
 pub fn spawn(bus: MessageBus, cfg: DataAgentConfig) -> JoinHandle<()> {
@@ -22,11 +22,24 @@ pub fn spawn(bus: MessageBus, cfg: DataAgentConfig) -> JoinHandle<()> {
 }
 
 async fn run(bus: MessageBus, cfg: DataAgentConfig) {
-    info!(symbols = ?cfg.symbols, "data agent starting");
-    let mut builders: HashMap<String, OhlcvBuilder> = cfg
+    let timeframes = if cfg.timeframes.is_empty() {
+        vec![Timeframe { seconds: 300 }]
+    } else {
+        cfg.timeframes
+    };
+    info!(symbols = ?cfg.symbols, timeframes = ?timeframes, "data agent starting");
+    let mut builders: HashMap<String, Vec<(i64, OhlcvBuilder)>> = cfg
         .symbols
         .iter()
-        .map(|s| (s.clone(), OhlcvBuilder::new(cfg.interval_secs)))
+        .map(|s| {
+            (
+                s.clone(),
+                timeframes
+                    .iter()
+                    .map(|tf| (tf.seconds, OhlcvBuilder::new(tf.seconds)))
+                    .collect(),
+            )
+        })
         .collect();
 
     let (tx, mut rx) = mpsc::channel::<WsEvent>(4096);
@@ -52,13 +65,29 @@ async fn run(bus: MessageBus, cfg: DataAgentConfig) {
     while let Some(event) = rx.recv().await {
         match event {
             WsEvent::Trade { symbol, trade } => {
-                let candle = builders.get_mut(&symbol).and_then(|b| b.ingest(trade));
+                let candles = builders
+                    .get_mut(&symbol)
+                    .map(|builders| {
+                        builders
+                            .iter_mut()
+                            .filter_map(|(timeframe_secs, builder)| {
+                                builder
+                                    .ingest(trade)
+                                    .map(|candle| (*timeframe_secs, candle))
+                            })
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default();
                 bus.publish(AgentEvent::Tick {
                     symbol: symbol.clone(),
                     trade,
                 });
-                if let Some(c) = candle {
-                    bus.publish(AgentEvent::CandleClosed { symbol, candle: c });
+                for (timeframe_secs, candle) in candles {
+                    bus.publish(AgentEvent::CandleClosed {
+                        symbol: symbol.clone(),
+                        timeframe_secs,
+                        candle,
+                    });
                 }
             }
             WsEvent::BookTicker {

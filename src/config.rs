@@ -59,6 +59,8 @@ pub struct StrategyCfg {
     pub mode: String,
     pub active: Vec<String>,
     pub min_ta_confidence: u8,
+    #[serde(default)]
+    pub paper_scout_enabled: bool,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -459,19 +461,45 @@ pub struct QuantCfg {
     pub kalman_min_velocity_bps: f64,
 }
 
-fn default_quant_kelly_cap() -> f64 { 0.25 }
-fn default_quant_kelly_min_trades() -> usize { 20 }
-fn default_quant_target_vol() -> f64 { 0.15 }
-fn default_quant_max_vol_mult() -> f64 { 2.0 }
-fn default_quant_vol_window() -> usize { 60 }
-fn default_quant_var_confidence() -> f64 { 0.95 }
-fn default_quant_max_var_pct() -> f64 { 0.03 }
-fn default_quant_ic_window() -> usize { 50 }
-fn default_quant_ic_min_abs() -> f64 { 0.05 }
-fn default_quant_ic_max_boost() -> u8 { 10 }
-fn default_quant_kalman_q() -> f64 { 0.01 }
-fn default_quant_kalman_r() -> f64 { 1.0 }
-fn default_quant_kalman_min_bps() -> f64 { 3.0 }
+fn default_quant_kelly_cap() -> f64 {
+    0.25
+}
+fn default_quant_kelly_min_trades() -> usize {
+    20
+}
+fn default_quant_target_vol() -> f64 {
+    0.15
+}
+fn default_quant_max_vol_mult() -> f64 {
+    2.0
+}
+fn default_quant_vol_window() -> usize {
+    60
+}
+fn default_quant_var_confidence() -> f64 {
+    0.95
+}
+fn default_quant_max_var_pct() -> f64 {
+    0.03
+}
+fn default_quant_ic_window() -> usize {
+    50
+}
+fn default_quant_ic_min_abs() -> f64 {
+    0.05
+}
+fn default_quant_ic_max_boost() -> u8 {
+    10
+}
+fn default_quant_kalman_q() -> f64 {
+    0.01
+}
+fn default_quant_kalman_r() -> f64 {
+    1.0
+}
+fn default_quant_kalman_min_bps() -> f64 {
+    3.0
+}
 
 impl Config {
     /// Load default + optional overlay TOML, then apply environment variable
