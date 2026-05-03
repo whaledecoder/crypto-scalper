@@ -15,8 +15,6 @@ use std::sync::Arc;
 use tokio::task::JoinHandle;
 use tracing::{info, warn};
 
-/// Per-symbol snapshot used by the status log so the operator can see
-/// current price and how stale the last tick is.
 #[derive(Default, Clone, Copy)]
 struct PriceSnapshot {
     price: f64,
@@ -24,10 +22,6 @@ struct PriceSnapshot {
     ticks: u64,
 }
 
-/// Running counters used by the periodic status log so the operator
-/// can see at a glance that the bot is actually receiving market
-/// data and evaluating strategies (it is otherwise silent for minutes
-/// at a time on 5m timeframes).
 #[derive(Default)]
 struct StatusCounters {
     prices: HashMap<String, PriceSnapshot>,
@@ -42,6 +36,7 @@ struct StatusCounters {
     manager_calls: u64,
     manager_vetoes: u64,
     orders_filled: u64,
+    trades_total: u64,
     last_signal: Option<SignalSnapshot>,
     last_block: Option<DecisionSnapshot>,
     last_brain: Option<DecisionSnapshot>,
@@ -63,68 +58,64 @@ struct DecisionSnapshot {
     reason: String,
 }
 
-fn fmt_counts(map: &HashMap<String, u64>) -> String {
-    if map.is_empty() {
-        return "-".to_string();
-    }
-    let mut entries: Vec<(&String, &u64)> = map.iter().collect();
-    entries.sort_by(|a, b| a.0.cmp(b.0));
-    entries
-        .iter()
-        .map(|(s, n)| format!("{}:{}", s, n))
-        .collect::<Vec<_>>()
-        .join(",")
-}
-
-/// Trim the common "USDT" suffix so the log stays readable: BTCUSDT -> BTC.
 fn short_sym(s: &str) -> &str {
     s.strip_suffix("USDT").unwrap_or(s)
 }
 
-/// Render the price snapshot map. Includes price, staleness (how old
-/// the last tick is in seconds at log-time) and tick count.
-fn fmt_prices(map: &HashMap<String, PriceSnapshot>, now: DateTime<Utc>) -> String {
+fn fmt_prices_compact(map: &HashMap<String, PriceSnapshot>, now: DateTime<Utc>) -> String {
     if map.is_empty() {
-        return "-".to_string();
+        return "—".to_string();
     }
     let mut entries: Vec<(&String, &PriceSnapshot)> = map.iter().collect();
     entries.sort_by(|a, b| a.0.cmp(b.0));
     entries
         .iter()
         .map(|(sym, snap)| {
-            let age = snap
-                .ts
-                .map(|t| (now - t).num_seconds().max(0))
-                .unwrap_or(-1);
-            format!(
-                "{}={:.2}({}s/{}t)",
-                short_sym(sym),
-                snap.price,
-                age,
-                snap.ticks,
-            )
+            let age = snap.ts.map(|t| (now - t).num_seconds().max(0)).unwrap_or(-1);
+            let stale = if age > 10 { "⚠" } else { "" };
+            format!("{}={:.2}{}", short_sym(sym), snap.price, stale)
         })
+        .collect::<Vec<_>>()
+        .join("  ")
+}
+
+fn fmt_candles_compact(map: &HashMap<String, u64>) -> String {
+    if map.is_empty() {
+        return "0".to_string();
+    }
+    let mut entries: Vec<(&String, &u64)> = map.iter().collect();
+    entries.sort_by(|a, b| a.0.cmp(b.0));
+    entries
+        .iter()
+        .map(|(s, n)| format!("{}:{}", short_sym(s), n))
         .collect::<Vec<_>>()
         .join(" ")
 }
 
-fn fmt_signal(s: &Option<SignalSnapshot>) -> String {
+fn fmt_signal_compact(s: &Option<SignalSnapshot>) -> String {
     match s {
         Some(s) => format!(
-            "{}:{}:{}:{}",
-            s.symbol,
+            "{} {} {} @{}%",
+            short_sym(&s.symbol),
             s.strategy.as_str(),
             s.side.as_str(),
             s.confidence
         ),
-        None => "-".to_string(),
+        None => "—".to_string(),
     }
 }
 
-fn fmt_decision(s: &Option<DecisionSnapshot>) -> String {
+fn fmt_block_compact(s: &Option<DecisionSnapshot>) -> String {
     match s {
-        Some(s) => format!("{}:{}:{}", s.symbol, s.stage, s.reason),
-        None => "-".to_string(),
+        Some(s) => format!("{} {}: {}", short_sym(&s.symbol), s.stage, s.reason),
+        None => "—".to_string(),
+    }
+}
+
+fn fmt_brain_compact(s: &Option<DecisionSnapshot>) -> String {
+    match s {
+        Some(s) => format!("{} {}", short_sym(&s.symbol), s.reason),
+        None => "—".to_string(),
     }
 }
 
@@ -135,43 +126,56 @@ pub fn spawn(
     telegram: Arc<TelegramNotifier>,
 ) -> JoinHandle<()> {
     let mut rx = bus.subscribe();
-    // Cache the most recent BrainOutcome per symbol so we can attach
-    // its reasoning to a trade record once the order actually fills.
     let last_brain: Arc<PlMutex<HashMap<String, BrainOutcome>>> =
         Arc::new(PlMutex::new(HashMap::new()));
     let counters: Arc<PlMutex<StatusCounters>> = Arc::new(PlMutex::new(StatusCounters::default()));
 
-    // Periodic status log — every 30s emit a single INFO line summarising
-    // ws/data/signal/brain/manager activity. Quiet bot does not mean dead bot.
+    // Periodic status — every 60s, emit 4 compact lines instead of one giant blob
     {
         let counters = counters.clone();
         tokio::spawn(async move {
-            let mut tick = tokio::time::interval(std::time::Duration::from_secs(30));
-            // Skip the immediate first tick — counters would all be zero.
+            let mut tick = tokio::time::interval(std::time::Duration::from_secs(60));
             tick.tick().await;
             loop {
                 tick.tick().await;
                 let c = counters.lock();
                 let now = Utc::now();
+                info!("┌─ ARIA STATUS ─────────────────────────────");
                 info!(
-                    prices = %fmt_prices(&c.prices, now),
-                    candles = %fmt_counts(&c.candles),
-                    signals = c.signals,
-                    risk_allowed = c.risk_allowed,
-                    risk_blocked = c.risk_blocked,
-                    brain = c.brain_calls,
-                    brain_go = c.brain_go,
-                    brain_nogo = c.brain_nogo,
-                    brain_wait = c.brain_wait,
-                    manager = c.manager_calls,
-                    vetoes = c.manager_vetoes,
-                    fills = c.orders_filled,
-                    last_signal = %fmt_signal(&c.last_signal),
-                    last_block = %fmt_decision(&c.last_block),
-                    last_brain = %fmt_decision(&c.last_brain),
-                    last_manager = %fmt_decision(&c.last_manager),
-                    "status"
+                    "│ 💹 {}",
+                    fmt_prices_compact(&c.prices, now)
                 );
+                info!(
+                    "│ 📊 candles={}  signals={}  allowed={}  blocked={}  fills={}  trades={}",
+                    fmt_candles_compact(&c.candles),
+                    c.signals,
+                    c.risk_allowed,
+                    c.risk_blocked,
+                    c.orders_filled,
+                    c.trades_total,
+                );
+                info!(
+                    "│ 🧠 brain={}  go={}  nogo={}  wait={}  manager={}  vetoes={}",
+                    c.brain_calls,
+                    c.brain_go,
+                    c.brain_nogo,
+                    c.brain_wait,
+                    c.manager_calls,
+                    c.manager_vetoes,
+                );
+                if c.last_signal.is_some() {
+                    info!("│ 🔍 last_signal : {}", fmt_signal_compact(&c.last_signal));
+                }
+                if c.last_block.is_some() {
+                    info!("│ 🚫 last_block  : {}", fmt_block_compact(&c.last_block));
+                }
+                if c.last_brain.is_some() {
+                    info!("│ 🤖 last_brain  : {}", fmt_brain_compact(&c.last_brain));
+                }
+                if let Some(m) = c.last_manager.as_ref() {
+                    info!("│ 👔 last_manager: {} {}: {}", short_sym(&m.symbol), m.stage, m.reason);
+                }
+                info!("└───────────────────────────────────────────");
             }
         });
     }
@@ -182,6 +186,9 @@ pub fn spawn(
             match ev {
                 AgentEvent::Shutdown => break,
                 AgentEvent::Tick { symbol, trade } => {
+                    if trade.price <= 0.0 {
+                        continue; // drop zero-price WS artifacts
+                    }
                     let mut c = counters.lock();
                     let snap = c.prices.entry(symbol).or_default();
                     snap.price = trade.price;
@@ -209,13 +216,11 @@ pub fn spawn(
                             c.risk_allowed += 1;
                             c.last_block = None;
                             info!(
-                                symbol = %risk.signal.symbol,
+                                symbol   = %risk.signal.symbol,
                                 strategy = %risk.signal.strategy.as_str(),
-                                side = %risk.signal.side.as_str(),
-                                size = risk.size,
-                                ta = risk.signal.ta_confidence,
-                                ta_threshold = risk.effective_ta_threshold,
-                                llm_floor = risk.effective_llm_floor,
+                                side     = %risk.signal.side.as_str(),
+                                size     = risk.size,
+                                ta       = risk.signal.ta_confidence,
                                 "risk: allowed signal"
                             );
                         }
@@ -228,27 +233,23 @@ pub fn spawn(
                                 reason: reason.clone(),
                             });
                             info!(
-                                symbol = %risk.signal.symbol,
+                                symbol   = %risk.signal.symbol,
                                 strategy = %risk.signal.strategy.as_str(),
-                                side = %risk.signal.side.as_str(),
-                                ta = risk.signal.ta_confidence,
-                                ta_threshold = risk.effective_ta_threshold,
-                                llm_floor = risk.effective_llm_floor,
-                                reason = %reason,
+                                side     = %risk.signal.side.as_str(),
+                                ta       = risk.signal.ta_confidence,
+                                reason   = %reason,
                                 "risk: blocked signal"
                             );
                         }
                     }
                 }
                 AgentEvent::BrainOutcomeReady(brain) => {
-                    last_brain
-                        .lock()
-                        .insert(brain.signal.symbol.clone(), brain.clone());
+                    last_brain.lock().insert(brain.signal.symbol.clone(), brain.clone());
                     record_brain(&metrics, &brain);
                     let mut c = counters.lock();
                     c.brain_calls += 1;
                     match brain.decision.decision {
-                        Decision::Go => c.brain_go += 1,
+                        Decision::Go   => c.brain_go   += 1,
                         Decision::NoGo => c.brain_nogo += 1,
                         Decision::Wait => c.brain_wait += 1,
                     }
@@ -287,25 +288,23 @@ pub fn spawn(
                 AgentEvent::ControlCommand(ControlCommand::StatusRequest) => {
                     let c = counters.lock();
                     let now = Utc::now();
+                    info!("┌─ ARIA STATUS (on-demand) ──────────────────");
+                    info!("│ 💹 {}", fmt_prices_compact(&c.prices, now));
                     info!(
-                        prices = %fmt_prices(&c.prices, now),
-                        candles = %fmt_counts(&c.candles),
-                        signals = c.signals,
-                        risk_allowed = c.risk_allowed,
-                        risk_blocked = c.risk_blocked,
-                        brain = c.brain_calls,
-                        brain_go = c.brain_go,
-                        brain_nogo = c.brain_nogo,
-                        brain_wait = c.brain_wait,
-                        manager = c.manager_calls,
-                        vetoes = c.manager_vetoes,
-                        fills = c.orders_filled,
-                        last_signal = %fmt_signal(&c.last_signal),
-                        last_block = %fmt_decision(&c.last_block),
-                        last_brain = %fmt_decision(&c.last_brain),
-                        last_manager = %fmt_decision(&c.last_manager),
-                        "status requested"
+                        "│ 📊 candles={}  signals={}  allowed={}  blocked={}  fills={}  trades={}",
+                        fmt_candles_compact(&c.candles),
+                        c.signals, c.risk_allowed, c.risk_blocked,
+                        c.orders_filled, c.trades_total,
                     );
+                    info!(
+                        "│ 🧠 brain={}  go={}  nogo={}  wait={}  manager={}  vetoes={}",
+                        c.brain_calls, c.brain_go, c.brain_nogo,
+                        c.brain_wait, c.manager_calls, c.manager_vetoes,
+                    );
+                    info!("│ 🔍 last_signal : {}", fmt_signal_compact(&c.last_signal));
+                    info!("│ 🚫 last_block  : {}", fmt_block_compact(&c.last_block));
+                    info!("│ 🤖 last_brain  : {}", fmt_brain_compact(&c.last_brain));
+                    info!("└────────────────────────────────────────────");
                 }
                 AgentEvent::OrderFilled {
                     client_id,
@@ -314,30 +313,57 @@ pub fn spawn(
                     size,
                     ack,
                 } => {
-                    counters.lock().orders_filled += 1;
-                    let brain = last_brain.lock().get(&symbol).cloned();
-                    if let Some(brain) = brain {
-                        if let Err(e) =
-                            log_open_trade(&journal, &client_id, &symbol, side, size, &ack, &brain)
-                        {
+                    // Scope lock strictly — must not cross .await boundary
+                    let trade_no = {
+                        let mut c = counters.lock();
+                        c.orders_filled += 1;
+                        c.trades_total  += 1;
+                        c.trades_total
+                    };
+
+                    let brain = { last_brain.lock().get(&symbol).cloned() };
+                    let (sl, tp, strategy) = brain.as_ref().map(|b| {
+                        (b.signal.stop_loss, b.signal.take_profit, b.signal.strategy.as_str().to_string())
+                    }).unwrap_or((0.0, 0.0, "—".to_string()));
+
+                    if let Some(b) = &brain {
+                        if let Err(e) = log_open_trade(
+                            &journal, &client_id, &symbol, side, size, &ack, b,
+                        ) {
                             warn!(error = %e, "monitor: insert_trade failed");
                         }
                     }
-                    let _ = telegram
-                        .send(&format!(
-                            "🟢 *OPEN* `{}` {} size `{:.4}` @ `{:.2}`",
-                            symbol,
-                            side.as_str(),
-                            size,
-                            ack.avg_fill_price
-                        ))
-                        .await;
+
+                    let side_label = if side == crate::data::Side::Long { "BUY" } else { "SELL" };
+                    let sl_line = if sl > 0.0 { format!("{:.4}", sl) } else { "—".to_string() };
+                    let tp_line = if tp > 0.0 { format!("{:.4}", tp) } else { "—".to_string() };
+
+                    let msg = format!(
+                        "🟢 <b>POSISI DIBUKA</b>\n\
+                         ──────────\n\
+                         📊 {} #{} · {}\n\
+                         📍 Entry: <code>{:.4}</code>\n\
+                         🛡 SL: <code>{}</code>\n\
+                         🎯 TP: <code>{}</code>\n\
+                         💼 Size: <code>{:.4}</code> {}\n\
+                         🔧 Strategi: {}",
+                        side_label,
+                        trade_no,
+                        short_sym(&symbol),
+                        ack.avg_fill_price,
+                        sl_line,
+                        tp_line,
+                        size,
+                        short_sym(&symbol),
+                        strategy,
+                    );
+                    let _ = telegram.send(&msg).await;
                 }
                 AgentEvent::PositionClosed {
                     client_id,
                     symbol,
                     side,
-                    size: _,
+                    size,
                     entry_price,
                     exit_price,
                     pnl_usd,
@@ -352,7 +378,7 @@ pub fn spawn(
                         &client_id,
                         Utc::now(),
                         exit_price,
-                        &format!("{:?}", reason),
+                        reason.as_str(),
                         pnl_usd,
                         pnl_pct,
                         0.0,
@@ -360,18 +386,55 @@ pub fn spawn(
                         warn!(error = %e, "monitor: close_trade failed");
                     }
                     metrics.update(|m| {
-                        m.daily_pnl += pnl_usd;
+                        m.daily_pnl   += pnl_usd;
                         m.trades_today += 1;
                     });
-                    let _ = telegram
-                        .send(&format!(
-                            "🔴 *CLOSE* `{}` {} pnl `{:+.2}$` ({:?})",
-                            symbol,
-                            side.as_str(),
-                            pnl_usd,
-                            reason
-                        ))
-                        .await;
+
+                    let trade_no = { counters.lock().trades_total };
+                    let side_label = if side == crate::data::Side::Long { "BUY" } else { "SELL" };
+                    let is_win = pnl_usd > 0.0;
+
+                    let header = match reason {
+                        crate::execution::PositionExitReason::TakeProfit => "✅ <b>TAKE PROFIT HIT!</b>",
+                        crate::execution::PositionExitReason::StopLoss   => "❌ <b>STOP LOSS HIT</b>",
+                        crate::execution::PositionExitReason::Trailing   => "🔄 <b>TRAILING STOP</b>",
+                        crate::execution::PositionExitReason::TimeExit   => "⏰ <b>TIME EXIT</b>",
+                        crate::execution::PositionExitReason::Manual     => "🔧 <b>MANUAL CLOSE</b>",
+                        crate::execution::PositionExitReason::Breakeven  => "🔒 <b>BREAKEVEN EXIT</b>",
+                        crate::execution::PositionExitReason::PartialTP  => "🎯 <b>PARTIAL TAKE PROFIT</b>",
+                    };
+                    let result_line = if is_win {
+                        "🏆 Result: <b>WIN</b>"
+                    } else {
+                        "📉 Result: <b>LOSS</b>"
+                    };
+                    let pnl_sign = if pnl_usd >= 0.0 { "+" } else { "" };
+
+                    let msg = format!(
+                        "{}\n\
+                         ──────────\n\
+                         📊 {} #{} · {}\n\
+                         📍 Entry: <code>{:.4}</code>\n\
+                         🏁 Exit:  <code>{:.4}</code>\n\
+                         💼 Size:  <code>{:.4}</code> {}\n\
+                         💰 PnL:   <code>{}{:.2}$</code> ({}{:.4}%)\n\
+                         {}\n\
+                         🤖 ARIA v1.0",
+                        header,
+                        side_label,
+                        trade_no,
+                        short_sym(&symbol),
+                        entry_price,
+                        exit_price,
+                        size,
+                        short_sym(&symbol),
+                        pnl_sign,
+                        pnl_usd,
+                        pnl_sign,
+                        pnl_pct.abs(),
+                        result_line,
+                    );
+                    let _ = telegram.send(&msg).await;
                 }
                 AgentEvent::PolicyRefreshed { lessons_count, .. } => {
                     metrics.update(|m| m.active_lessons = lessons_count as u64);
@@ -387,7 +450,7 @@ fn record_brain(metrics: &MetricsState, brain: &BrainOutcome) {
         let n = m.llm_go + m.llm_nogo + m.llm_wait;
         let avg = m.llm_avg_confidence * n as f64 + brain.decision.confidence as f64;
         match brain.decision.decision {
-            Decision::Go => m.llm_go += 1,
+            Decision::Go   => m.llm_go   += 1,
             Decision::NoGo => m.llm_nogo += 1,
             Decision::Wait => m.llm_wait += 1,
         }

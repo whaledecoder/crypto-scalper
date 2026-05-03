@@ -69,6 +69,9 @@ pub fn spawn(deps: ExecutionAgentDeps) -> JoinHandle<()> {
         while let Ok(ev) = rx.recv().await {
             match ev {
                 AgentEvent::Tick { symbol, trade } => {
+                    if trade.price <= 0.0 {
+                        continue; // drop zero-price ticks — WS artifact
+                    }
                     last_marks.lock().insert(symbol.clone(), trade.price);
                     // Mark-price exit checks happen here so we own the
                     // bus emission when a position closes.
