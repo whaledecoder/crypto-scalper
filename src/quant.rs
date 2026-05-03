@@ -21,9 +21,7 @@
 //!    is highly correlated with existing open positions.
 
 use crate::data::Side;
-use crate::portfolio::{
-    historical_cvar, kelly_fraction, volatility_target_multiplier,
-};
+use crate::portfolio::{historical_cvar, kelly_fraction, volatility_target_multiplier};
 use crate::research::ic::IcTracker;
 use crate::strategy::kalman::KalmanTrend;
 use parking_lot::Mutex;
@@ -243,6 +241,16 @@ pub struct QuantSizingResult {
     pub reason: String,
 }
 
+pub struct QuantSizingInput<'a> {
+    pub symbol: &'a str,
+    pub strategy: &'a str,
+    pub side: Side,
+    pub entry: f64,
+    pub stop_loss: f64,
+    pub equity: f64,
+    pub base_risk_pct: f64,
+}
+
 impl QuantEngine {
     pub fn new(cfg: QuantConfig) -> Self {
         Self {
@@ -257,17 +265,16 @@ impl QuantEngine {
     // ── Public API ─────────────────────────────────────────────────
 
     /// Main entry point: compute quant-adjusted sizing for a signal.
-    pub fn compute_sizing(
-        &self,
-        symbol: &str,
-        strategy: &str,
-        side: Side,
-        _ta_confidence: u8,
-        entry: f64,
-        stop_loss: f64,
-        equity: f64,
-        base_risk_pct: f64,
-    ) -> QuantSizingResult {
+    pub fn compute_sizing(&self, input: QuantSizingInput<'_>) -> QuantSizingResult {
+        let QuantSizingInput {
+            symbol,
+            strategy,
+            side,
+            entry,
+            stop_loss,
+            equity,
+            base_risk_pct,
+        } = input;
         if !self.cfg.enabled {
             return QuantSizingResult {
                 size_multiplier: 1.0,
@@ -403,9 +410,13 @@ impl QuantEngine {
     /// Update Kalman filter with latest price (called on each tick/candle).
     pub fn update_kalman(&self, symbol: &str, price: f64) {
         let mut kalman = self.kalman.lock();
-        let entry = kalman
-            .entry(symbol.to_string())
-            .or_insert_with(|| KalmanTrend::new(price, self.cfg.kalman_process_noise, self.cfg.kalman_measurement_noise));
+        let entry = kalman.entry(symbol.to_string()).or_insert_with(|| {
+            KalmanTrend::new(
+                price,
+                self.cfg.kalman_process_noise,
+                self.cfg.kalman_measurement_noise,
+            )
+        });
         entry.update(price);
     }
 
@@ -465,12 +476,10 @@ impl QuantEngine {
             if let Some(ic) = tracker.ic() {
                 if ic.abs() >= self.cfg.ic_min_abs {
                     // Positive IC = boost confidence, negative = penalize
-                    let boost = (ic * self.cfg.ic_max_boost as f64)
-                        .round()
-                        .clamp(
-                            -(self.cfg.ic_max_boost as f64),
-                            self.cfg.ic_max_boost as f64,
-                        ) as i8;
+                    let boost = (ic * self.cfg.ic_max_boost as f64).round().clamp(
+                        -(self.cfg.ic_max_boost as f64),
+                        self.cfg.ic_max_boost as f64,
+                    ) as i8;
                     return boost;
                 }
             }

@@ -31,5 +31,6 @@ pub mod watchdog;
 pub use bus::MessageBus;
 pub use messages::{
     AgentEvent, AgentId, BrainOutcome, ControlCommand, FeedsSnapshotMsg, ManagerAction,
-    ManagerProposal, ManagerVerdict, RiskOutcome, RiskVerdictMsg, SurvivalMode, SurvivalState,
+    ManagerProposal, ManagerVerdict, RiskOutcome, RiskVerdictMsg, SignalEvaluationMsg,
+    SurvivalMode, SurvivalState,
 };

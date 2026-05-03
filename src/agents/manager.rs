@@ -123,6 +123,17 @@ pub fn spawn(
                     let started = Instant::now();
                     let manager_off = !cfg.enabled || cfg.api_key.is_empty();
                     let surv_snapshot = survival.lock().clone();
+                    info!(
+                        symbol = %proposal.symbol,
+                        side = %proposal.side.as_str(),
+                        strategy = %proposal.strategy,
+                        regime = %proposal.regime,
+                        brain_confidence = proposal.llm_confidence,
+                        ta_confidence = proposal.ta_confidence,
+                        size = proposal.size,
+                        manager_enabled = cfg.enabled,
+                        "manager: reviewing brain-approved setup"
+                    );
                     // Survival hard-veto: if Frozen/Dead, skip the LLM
                     // entirely and refuse the trade.
                     if let Some(s) = &surv_snapshot {
@@ -190,6 +201,7 @@ pub fn spawn(
                         symbol = %proposal.symbol,
                         action = ?action,
                         latency_ms = latency,
+                        reason = %manager_action_summary(&action),
                         "manager verdict"
                     );
                     bus.publish(AgentEvent::ManagerVerdictEmitted(ManagerVerdict {
@@ -213,12 +225,31 @@ fn build_proposal(brain: &BrainOutcome) -> ManagerProposal {
         side: signal.side,
         strategy: signal.strategy.as_str().to_string(),
         regime: brain.regime.as_str().to_string(),
-        entry: brain.decision.entry_price.filter(|&p| p > 0.0).unwrap_or(signal.entry),
+        entry: brain
+            .decision
+            .entry_price
+            .filter(|&p| p > 0.0)
+            .unwrap_or(signal.entry),
         stop_loss: signal.stop_loss,
         take_profit: signal.take_profit,
         size: brain.risk.size,
         ta_confidence: signal.ta_confidence,
         llm_confidence: brain.decision.confidence,
+    }
+}
+
+fn manager_action_summary(action: &ManagerAction) -> String {
+    match action {
+        ManagerAction::Approve => "approve".to_string(),
+        ManagerAction::Veto { reason } => format!("veto: {reason}"),
+        ManagerAction::Adjust {
+            size_multiplier,
+            sl_offset_bps,
+            tp_offset_bps,
+            reason,
+        } => format!(
+            "adjust size_x={size_multiplier:.2} sl_bps={sl_offset_bps:.1} tp_bps={tp_offset_bps:.1}: {reason}"
+        ),
     }
 }
 

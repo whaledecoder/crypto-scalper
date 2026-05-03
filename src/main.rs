@@ -151,13 +151,16 @@ async fn run_backtest(cfg: &Config) -> Result<()> {
         .iter()
         .filter_map(|s| StrategyName::parse(s))
         .collect();
-    let interval_secs = cfg
+    let timeframes: Vec<Timeframe> = cfg
         .pairs
         .timeframes
+        .iter()
+        .filter_map(|s| Timeframe::parse(s).ok())
+        .collect();
+    let entry_timeframe = timeframes
         .first()
-        .and_then(|s| Timeframe::parse(s).ok())
-        .map(|t| t.seconds)
-        .unwrap_or(300);
+        .copied()
+        .unwrap_or(Timeframe { seconds: 300 });
 
     let mut reports = Vec::new();
     for symbol in &cfg.pairs.symbols {
@@ -166,7 +169,7 @@ async fn run_backtest(cfg: &Config) -> Result<()> {
             warn!(csv = %file.display(), "missing backtest csv — skipping");
             continue;
         }
-        let candles = load_csv(&file, interval_secs)?;
+        let candles = load_csv(&file, entry_timeframe.seconds)?;
         let engine = BacktestEngine {
             symbol: symbol.clone(),
             active: active.clone(),
@@ -297,13 +300,16 @@ async fn run_agents(cfg: Config) -> Result<()> {
     ));
 
     // --- Per-symbol state (owned by SignalAgent, read by BrainAgent) ---
-    let interval_secs = cfg
+    let timeframes: Vec<Timeframe> = cfg
         .pairs
         .timeframes
+        .iter()
+        .filter_map(|s| Timeframe::parse(s).ok())
+        .collect();
+    let entry_timeframe = timeframes
         .first()
-        .and_then(|s| Timeframe::parse(s).ok())
-        .map(|t| t.seconds)
-        .unwrap_or(300);
+        .copied()
+        .unwrap_or(Timeframe { seconds: 300 });
     let mut states_map: HashMap<String, SymbolState> = HashMap::new();
     for s in &cfg.pairs.symbols {
         states_map.insert(s.clone(), SymbolState::new(s));
@@ -315,14 +321,12 @@ async fn run_agents(cfg: Config) -> Result<()> {
     // EmaRibbon can fire, and ADX needs ~28 candles before RegimeDetector
     // can classify anything other than Unknown.
     {
-        let bootstrap_tf = cfg
-            .pairs
-            .timeframes
-            .first()
-            .and_then(|s| Timeframe::parse(s).ok())
-            .unwrap_or(Timeframe { seconds: 300 });
-        crypto_scalper::data::bootstrap_states(&states, &cfg.exchange.rest_base_url, &bootstrap_tf)
-            .await;
+        crypto_scalper::data::bootstrap_states(
+            &states,
+            &cfg.exchange.rest_base_url,
+            &entry_timeframe,
+        )
+        .await;
     }
 
     let active: Vec<StrategyName> = cfg
@@ -412,7 +416,7 @@ async fn run_agents(cfg: Config) -> Result<()> {
         crypto_scalper::agents::data::DataAgentConfig {
             ws_base_url: cfg.exchange.ws_base_url.clone(),
             symbols: cfg.pairs.symbols.clone(),
-            interval_secs,
+            timeframes: timeframes.clone(),
         },
     );
     let _feeds = crypto_scalper::agents::feeds::spawn(
@@ -449,10 +453,14 @@ async fn run_agents(cfg: Config) -> Result<()> {
     let _signal = crypto_scalper::agents::signal::spawn(
         bus.clone(),
         Arc::clone(&states),
-        active.clone(),
-        cfg.schedule.clone(),
-        cfg.advanced_alpha.clone(),
-        Some(Arc::clone(&quant_engine)),
+        crypto_scalper::agents::signal::SignalAgentConfig {
+            active: active.clone(),
+            schedule: cfg.schedule.clone(),
+            advanced_alpha: cfg.advanced_alpha.clone(),
+            quant_engine: Some(Arc::clone(&quant_engine)),
+            paper_scout_enabled: cfg.mode.run_mode == "paper" && cfg.strategy.paper_scout_enabled,
+            entry_timeframe_secs: entry_timeframe.seconds,
+        },
     );
 
     let _risk = crypto_scalper::agents::risk::spawn(

@@ -9,7 +9,7 @@ use crate::agents::MessageBus;
 use crate::feeds::ExternalSnapshot;
 use crate::learning::LearningPolicy;
 use crate::llm::engine::LlmEngine;
-use crate::llm::{ContextBuilder, Decision};
+use crate::llm::ContextBuilder;
 use crate::strategy::state::SymbolState;
 use parking_lot::RwLock as PlRwLock;
 use std::collections::HashMap;
@@ -58,6 +58,18 @@ pub fn spawn(
                         &symbol,
                     );
 
+                    info!(
+                        symbol = %symbol,
+                        side = %signal.side.as_str(),
+                        strategy = %signal.strategy.as_str(),
+                        regime = %regime.as_str(),
+                        ta_confidence = signal.ta_confidence,
+                        entry = signal.entry,
+                        sl = signal.stop_loss,
+                        tp = signal.take_profit,
+                        "brain: analyzing risk-approved setup"
+                    );
+
                     let llm_out = match llm.analyze(&ctx).await {
                         Ok(o) => o,
                         Err(e) => {
@@ -79,14 +91,14 @@ pub fn spawn(
                         llm_confidence: llm_out.decision.confidence,
                     };
 
-                    if llm_out.decision.decision != Decision::Go {
-                        info!(
-                            symbol = %symbol,
-                            decision = ?llm_out.decision.decision,
-                            "brain agent: rejected"
-                        );
-                        // Still publish the outcome for observability.
-                    }
+                    info!(
+                        symbol = %symbol,
+                        decision = ?llm_out.decision.decision,
+                        confidence = llm_out.decision.confidence,
+                        offline_fallback = llm_out.offline_fallback,
+                        reason = %llm_out.decision.reasoning.summary,
+                        "brain: decision"
+                    );
 
                     bus.publish(AgentEvent::BrainOutcomeReady(BrainOutcome {
                         signal: Box::new(signal),

@@ -38,6 +38,7 @@ struct StatusCounters {
     orders_filled: u64,
     trades_total: u64,
     last_signal: Option<SignalSnapshot>,
+    last_signal_eval: Option<SignalEvalSnapshot>,
     last_block: Option<DecisionSnapshot>,
     last_brain: Option<DecisionSnapshot>,
     last_manager: Option<DecisionSnapshot>,
@@ -49,6 +50,17 @@ struct SignalSnapshot {
     strategy: StrategyName,
     side: crate::data::Side,
     confidence: u8,
+}
+
+#[derive(Clone)]
+struct SignalEvalSnapshot {
+    symbol: String,
+    timeframe_secs: i64,
+    regime: String,
+    candles: usize,
+    strategies: String,
+    reason: String,
+    best: String,
 }
 
 #[derive(Clone)]
@@ -71,7 +83,10 @@ fn fmt_prices_compact(map: &HashMap<String, PriceSnapshot>, now: DateTime<Utc>) 
     entries
         .iter()
         .map(|(sym, snap)| {
-            let age = snap.ts.map(|t| (now - t).num_seconds().max(0)).unwrap_or(-1);
+            let age = snap
+                .ts
+                .map(|t| (now - t).num_seconds().max(0))
+                .unwrap_or(-1);
             let stale = if age > 10 { "⚠" } else { "" };
             format!("{}={:.2}{}", short_sym(sym), snap.price, stale)
         })
@@ -123,6 +138,22 @@ fn emit_status_line(line: impl std::fmt::Display) {
     info!("{}", line);
 }
 
+fn fmt_signal_eval(s: &Option<SignalEvalSnapshot>) -> String {
+    match s {
+        Some(s) => format!(
+            "{}:{}m:{}:{}c:{}:best={}:{}",
+            s.symbol,
+            s.timeframe_secs / 60,
+            s.regime,
+            s.candles,
+            s.strategies,
+            s.best,
+            s.reason
+        ),
+        None => "-".to_string(),
+    }
+}
+
 pub fn spawn(
     bus: MessageBus,
     metrics: Arc<MetricsState>,
@@ -165,16 +196,36 @@ pub fn spawn(
                     c.manager_vetoes,
                 ));
                 if c.last_signal.is_some() {
-                    emit_status_line(format_args!("│ 🔍 last_signal : {}", fmt_signal_compact(&c.last_signal)));
+                    emit_status_line(format_args!(
+                        "│ 🔍 last_signal : {}",
+                        fmt_signal_compact(&c.last_signal)
+                    ));
+                }
+                if c.last_signal_eval.is_some() {
+                    emit_status_line(format_args!(
+                        "│ 🧭 last_eval   : {}",
+                        fmt_signal_eval(&c.last_signal_eval)
+                    ));
                 }
                 if c.last_block.is_some() {
-                    emit_status_line(format_args!("│ 🚫 last_block  : {}", fmt_block_compact(&c.last_block)));
+                    emit_status_line(format_args!(
+                        "│ 🚫 last_block  : {}",
+                        fmt_block_compact(&c.last_block)
+                    ));
                 }
                 if c.last_brain.is_some() {
-                    emit_status_line(format_args!("│ 🤖 last_brain  : {}", fmt_brain_compact(&c.last_brain)));
+                    emit_status_line(format_args!(
+                        "│ 🤖 last_brain  : {}",
+                        fmt_brain_compact(&c.last_brain)
+                    ));
                 }
                 if let Some(m) = c.last_manager.as_ref() {
-                    emit_status_line(format_args!("│ 👔 last_manager: {} {}: {}", short_sym(&m.symbol), m.stage, m.reason));
+                    emit_status_line(format_args!(
+                        "│ 👔 last_manager: {} {}: {}",
+                        short_sym(&m.symbol),
+                        m.stage,
+                        m.reason
+                    ));
                 }
                 emit_status_line("└───────────────────────────────────────────");
             }
@@ -196,8 +247,16 @@ pub fn spawn(
                     snap.ts = Some(trade.ts);
                     snap.ticks += 1;
                 }
-                AgentEvent::CandleClosed { symbol, .. } => {
-                    *counters.lock().candles.entry(symbol).or_insert(0) += 1;
+                AgentEvent::CandleClosed {
+                    symbol,
+                    timeframe_secs,
+                    ..
+                } => {
+                    *counters
+                        .lock()
+                        .candles
+                        .entry(format!("{symbol}:{}m", timeframe_secs / 60))
+                        .or_insert(0) += 1;
                 }
                 AgentEvent::PreSignalEmitted { signal, .. } => {
                     metrics.update(|m| m.signals_today += 1);
@@ -209,6 +268,42 @@ pub fn spawn(
                         side: signal.side,
                         confidence: signal.ta_confidence,
                     });
+                }
+                AgentEvent::SignalEvaluation(e) => {
+                    let mut c = counters.lock();
+                    let regime = e.regime.map(|r| r.as_str()).unwrap_or("SKIPPED");
+                    let strategies = if e.strategies.is_empty() {
+                        "-".to_string()
+                    } else {
+                        e.strategies
+                            .iter()
+                            .map(|s| s.as_str())
+                            .collect::<Vec<_>>()
+                            .join("|")
+                    };
+                    let best = match (e.best_strategy, e.best_confidence) {
+                        (Some(strategy), Some(confidence)) => {
+                            format!("{}:{confidence}", strategy.as_str())
+                        }
+                        _ => "-".to_string(),
+                    };
+                    c.last_signal_eval = Some(SignalEvalSnapshot {
+                        symbol: e.symbol.clone(),
+                        timeframe_secs: e.timeframe_secs,
+                        regime: regime.to_string(),
+                        candles: e.candles,
+                        strategies,
+                        reason: e.reason.clone(),
+                        best,
+                    });
+                    info!(
+                        symbol = %e.symbol,
+                        timeframe = %format!("{}m", e.timeframe_secs / 60),
+                        regime = %regime,
+                        candles = e.candles,
+                        reason = %e.reason,
+                        "signal: no trade candidate"
+                    );
                 }
                 AgentEvent::RiskVerdict(risk) => {
                     let mut c = counters.lock();
@@ -245,12 +340,14 @@ pub fn spawn(
                     }
                 }
                 AgentEvent::BrainOutcomeReady(brain) => {
-                    last_brain.lock().insert(brain.signal.symbol.clone(), brain.clone());
+                    last_brain
+                        .lock()
+                        .insert(brain.signal.symbol.clone(), brain.clone());
                     record_brain(&metrics, &brain);
                     let mut c = counters.lock();
                     c.brain_calls += 1;
                     match brain.decision.decision {
-                        Decision::Go   => c.brain_go   += 1,
+                        Decision::Go => c.brain_go += 1,
                         Decision::NoGo => c.brain_nogo += 1,
                         Decision::Wait => c.brain_wait += 1,
                     }
@@ -294,17 +391,45 @@ pub fn spawn(
                     emit_status_line(format_args!(
                         "│ 📊 candles={}  signals={}  allowed={}  blocked={}  fills={}  trades={}",
                         fmt_candles_compact(&c.candles),
-                        c.signals, c.risk_allowed, c.risk_blocked,
-                        c.orders_filled, c.trades_total,
+                        c.signals,
+                        c.risk_allowed,
+                        c.risk_blocked,
+                        c.orders_filled,
+                        c.trades_total,
                     ));
                     emit_status_line(format_args!(
                         "│ 🧠 brain={}  go={}  nogo={}  wait={}  manager={}  vetoes={}",
-                        c.brain_calls, c.brain_go, c.brain_nogo,
-                        c.brain_wait, c.manager_calls, c.manager_vetoes,
+                        c.brain_calls,
+                        c.brain_go,
+                        c.brain_nogo,
+                        c.brain_wait,
+                        c.manager_calls,
+                        c.manager_vetoes,
                     ));
-                    emit_status_line(format_args!("│ 🔍 last_signal : {}", fmt_signal_compact(&c.last_signal)));
-                    emit_status_line(format_args!("│ 🚫 last_block  : {}", fmt_block_compact(&c.last_block)));
-                    emit_status_line(format_args!("│ 🤖 last_brain  : {}", fmt_brain_compact(&c.last_brain)));
+                    emit_status_line(format_args!(
+                        "│ 🔍 last_signal : {}",
+                        fmt_signal_compact(&c.last_signal)
+                    ));
+                    emit_status_line(format_args!(
+                        "│ 🧭 last_eval   : {}",
+                        fmt_signal_eval(&c.last_signal_eval)
+                    ));
+                    emit_status_line(format_args!(
+                        "│ 🚫 last_block  : {}",
+                        fmt_block_compact(&c.last_block)
+                    ));
+                    emit_status_line(format_args!(
+                        "│ 🤖 last_brain  : {}",
+                        fmt_brain_compact(&c.last_brain)
+                    ));
+                    if let Some(m) = c.last_manager.as_ref() {
+                        emit_status_line(format_args!(
+                            "│ 👔 last_manager: {} {}: {}",
+                            short_sym(&m.symbol),
+                            m.stage,
+                            m.reason
+                        ));
+                    }
                     emit_status_line("└────────────────────────────────────────────");
                 }
                 AgentEvent::OrderFilled {
@@ -318,26 +443,45 @@ pub fn spawn(
                     let trade_no = {
                         let mut c = counters.lock();
                         c.orders_filled += 1;
-                        c.trades_total  += 1;
+                        c.trades_total += 1;
                         c.trades_total
                     };
 
                     let brain = { last_brain.lock().get(&symbol).cloned() };
-                    let (sl, tp, strategy) = brain.as_ref().map(|b| {
-                        (b.signal.stop_loss, b.signal.take_profit, b.signal.strategy.as_str().to_string())
-                    }).unwrap_or((0.0, 0.0, "—".to_string()));
+                    let (sl, tp, strategy) = brain
+                        .as_ref()
+                        .map(|b| {
+                            (
+                                b.signal.stop_loss,
+                                b.signal.take_profit,
+                                b.signal.strategy.as_str().to_string(),
+                            )
+                        })
+                        .unwrap_or((0.0, 0.0, "—".to_string()));
 
                     if let Some(b) = &brain {
-                        if let Err(e) = log_open_trade(
-                            &journal, &client_id, &symbol, side, size, &ack, b,
-                        ) {
+                        if let Err(e) =
+                            log_open_trade(&journal, &client_id, &symbol, side, size, &ack, b)
+                        {
                             warn!(error = %e, "monitor: insert_trade failed");
                         }
                     }
 
-                    let side_label = if side == crate::data::Side::Long { "BUY" } else { "SELL" };
-                    let sl_line = if sl > 0.0 { format!("{:.4}", sl) } else { "—".to_string() };
-                    let tp_line = if tp > 0.0 { format!("{:.4}", tp) } else { "—".to_string() };
+                    let side_label = if side == crate::data::Side::Long {
+                        "BUY"
+                    } else {
+                        "SELL"
+                    };
+                    let sl_line = if sl > 0.0 {
+                        format!("{:.4}", sl)
+                    } else {
+                        "—".to_string()
+                    };
+                    let tp_line = if tp > 0.0 {
+                        format!("{:.4}", tp)
+                    } else {
+                        "—".to_string()
+                    };
 
                     let msg = format!(
                         "🟢 <b>POSISI DIBUKA</b>\n\
@@ -387,22 +531,32 @@ pub fn spawn(
                         warn!(error = %e, "monitor: close_trade failed");
                     }
                     metrics.update(|m| {
-                        m.daily_pnl   += pnl_usd;
+                        m.daily_pnl += pnl_usd;
                         m.trades_today += 1;
                     });
 
                     let trade_no = { counters.lock().trades_total };
-                    let side_label = if side == crate::data::Side::Long { "BUY" } else { "SELL" };
+                    let side_label = if side == crate::data::Side::Long {
+                        "BUY"
+                    } else {
+                        "SELL"
+                    };
                     let is_win = pnl_usd > 0.0;
 
                     let header = match reason {
-                        crate::execution::PositionExitReason::TakeProfit => "✅ <b>TAKE PROFIT HIT!</b>",
-                        crate::execution::PositionExitReason::StopLoss   => "❌ <b>STOP LOSS HIT</b>",
-                        crate::execution::PositionExitReason::Trailing   => "🔄 <b>TRAILING STOP</b>",
-                        crate::execution::PositionExitReason::TimeExit   => "⏰ <b>TIME EXIT</b>",
-                        crate::execution::PositionExitReason::Manual     => "🔧 <b>MANUAL CLOSE</b>",
-                        crate::execution::PositionExitReason::Breakeven  => "🔒 <b>BREAKEVEN EXIT</b>",
-                        crate::execution::PositionExitReason::PartialTP  => "🎯 <b>PARTIAL TAKE PROFIT</b>",
+                        crate::execution::PositionExitReason::TakeProfit => {
+                            "✅ <b>TAKE PROFIT HIT!</b>"
+                        }
+                        crate::execution::PositionExitReason::StopLoss => "❌ <b>STOP LOSS HIT</b>",
+                        crate::execution::PositionExitReason::Trailing => "🔄 <b>TRAILING STOP</b>",
+                        crate::execution::PositionExitReason::TimeExit => "⏰ <b>TIME EXIT</b>",
+                        crate::execution::PositionExitReason::Manual => "🔧 <b>MANUAL CLOSE</b>",
+                        crate::execution::PositionExitReason::Breakeven => {
+                            "🔒 <b>BREAKEVEN EXIT</b>"
+                        }
+                        crate::execution::PositionExitReason::PartialTP => {
+                            "🎯 <b>PARTIAL TAKE PROFIT</b>"
+                        }
                     };
                     let result_line = if is_win {
                         "🏆 Result: <b>WIN</b>"
@@ -451,7 +605,7 @@ fn record_brain(metrics: &MetricsState, brain: &BrainOutcome) {
         let n = m.llm_go + m.llm_nogo + m.llm_wait;
         let avg = m.llm_avg_confidence * n as f64 + brain.decision.confidence as f64;
         match brain.decision.decision {
-            Decision::Go   => m.llm_go   += 1,
+            Decision::Go => m.llm_go += 1,
             Decision::NoGo => m.llm_nogo += 1,
             Decision::Wait => m.llm_wait += 1,
         }

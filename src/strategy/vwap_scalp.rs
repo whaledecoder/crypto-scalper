@@ -22,8 +22,8 @@ impl Strategy for VwapScalp {
         let dist_pct = (c.close - vwap) / vwap.max(1e-9) * 100.0;
 
         // Wider zones: ±1.0% from VWAP (was ±0.5%) — crypto is volatile
-        let long_zone = dist_pct >= -1.0 && dist_pct <= 0.3;
-        let short_zone = dist_pct <= 1.0 && dist_pct >= -0.3;
+        let long_zone = (-1.0..=0.3).contains(&dist_pct);
+        let short_zone = (-0.3..=1.0).contains(&dist_pct);
 
         // Allow trades even with flat slope — the zone itself is the edge
         let side = if long_zone && slope >= -0.001 {
@@ -41,10 +41,7 @@ impl Strategy for VwapScalp {
                 // TP: VWAP + small buffer OR 1.2× ATR, whichever is closer
                 vwap.min(c.close + atr * 1.2),
             ),
-            Side::Short => (
-                c.close + 0.4 * atr,
-                vwap.max(c.close - atr * 1.2),
-            ),
+            Side::Short => (c.close + 0.4 * atr, vwap.max(c.close - atr * 1.2)),
         };
 
         let mut score: f64 = 62.0; // Above the 60 threshold
