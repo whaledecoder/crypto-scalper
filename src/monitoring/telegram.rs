@@ -34,7 +34,7 @@ impl TelegramNotifier {
             "chat_id": self.chat_id,
             "text": text,
             "disable_web_page_preview": true,
-            "parse_mode": "Markdown",
+            "parse_mode": "HTML",
         });
         let resp = self.client.post(&url).json(&body).send().await?;
         if !resp.status().is_success() {
