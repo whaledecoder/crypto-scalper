@@ -10,6 +10,10 @@ channel = "stable-25_05"
 localPort = 8080
 externalPort = 8080
 
+[[ports]]
+localPort = 9184
+externalPort = 80
+
 [workflows]
 runButton = "Project"
 
@@ -26,13 +30,13 @@ args = "Start application"
 name = "Start application"
 author = "agent"
 
-[workflows.workflow.metadata]
-outputType = "console"
-
 [[workflows.workflow.tasks]]
 task = "shell.exec"
 args = "ARIA_CONFIG_OVERLAY=config/replit.toml ARIA_MANAGER_ENABLED=false ./target/debug/aria"
 waitForPort = 8080
+
+[workflows.workflow.metadata]
+outputType = "console"
 
 [deployment]
 deploymentTarget = "vm"
