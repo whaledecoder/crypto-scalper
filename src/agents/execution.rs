@@ -77,6 +77,22 @@ pub fn spawn(deps: ExecutionAgentDeps) -> JoinHandle<()> {
                         let pnl = crate::execution::position::pnl_usd(&pos, trade.price);
                         risk.on_position_closed(pnl);
                         let _ = exchange.cancel_all(&pos.symbol).await;
+                        let pnl_pct = if pos.entry_price > 0.0 {
+                            (trade.price - pos.entry_price) / pos.entry_price * 100.0
+                        } else { 0.0 };
+                        info!(
+                            symbol  = %pos.symbol,
+                            side    = %pos.side.as_str(),
+                            reason  = %reason.as_str(),
+                            entry   = %format!("{:.4}", pos.entry_price),
+                            exit    = %format!("{:.4}", trade.price),
+                            sl      = %format!("{:.4}", pos.stop_loss),
+                            tp      = %format!("{:.4}", pos.take_profit),
+                            size    = %format!("{:.6}", pos.size),
+                            pnl_usd = %format!("{:+.4}", pnl),
+                            pnl_pct = %format!("{:+.4}%", pnl_pct),
+                            "execution: position closed"
+                        );
                         bus_for_close.publish(AgentEvent::PositionClosed {
                             client_id: pos.client_id.clone(),
                             symbol: pos.symbol.clone(),
@@ -136,6 +152,22 @@ pub fn spawn(deps: ExecutionAgentDeps) -> JoinHandle<()> {
                         let pnl = crate::execution::position::pnl_usd(&pos, mark);
                         risk.on_position_closed(pnl);
                         if let Some(closed) = book.close_by_id(&pos.client_id) {
+                            let pnl_pct = if closed.entry_price > 0.0 {
+                                (mark - closed.entry_price) / closed.entry_price * 100.0
+                            } else { 0.0 };
+                            info!(
+                                symbol  = %closed.symbol,
+                                side    = %closed.side.as_str(),
+                                reason  = "MANUAL(flat-all)",
+                                entry   = %format!("{:.4}", closed.entry_price),
+                                exit    = %format!("{:.4}", mark),
+                                sl      = %format!("{:.4}", closed.stop_loss),
+                                tp      = %format!("{:.4}", closed.take_profit),
+                                size    = %format!("{:.6}", closed.size),
+                                pnl_usd = %format!("{:+.4}", pnl),
+                                pnl_pct = %format!("{:+.4}%", pnl_pct),
+                                "execution: position closed"
+                            );
                             bus_for_close.publish(AgentEvent::PositionClosed {
                                 client_id: closed.client_id,
                                 symbol: closed.symbol,
