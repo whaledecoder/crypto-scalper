@@ -119,6 +119,10 @@ fn fmt_brain_compact(s: &Option<DecisionSnapshot>) -> String {
     }
 }
 
+fn emit_status_line(line: impl std::fmt::Display) {
+    info!("{}", line);
+}
+
 pub fn spawn(
     bus: MessageBus,
     metrics: Arc<MetricsState>,
@@ -140,12 +144,9 @@ pub fn spawn(
                 tick.tick().await;
                 let c = counters.lock();
                 let now = Utc::now();
-                info!("┌─ ARIA STATUS ─────────────────────────────");
-                info!(
-                    "│ 💹 {}",
-                    fmt_prices_compact(&c.prices, now)
-                );
-                info!(
+                emit_status_line("┌─ ARIA STATUS ─────────────────────────────");
+                emit_status_line(format_args!("│ 💹 {}", fmt_prices_compact(&c.prices, now)));
+                emit_status_line(format_args!(
                     "│ 📊 candles={}  signals={}  allowed={}  blocked={}  fills={}  trades={}",
                     fmt_candles_compact(&c.candles),
                     c.signals,
@@ -153,8 +154,8 @@ pub fn spawn(
                     c.risk_blocked,
                     c.orders_filled,
                     c.trades_total,
-                );
-                info!(
+                ));
+                emit_status_line(format_args!(
                     "│ 🧠 brain={}  go={}  nogo={}  wait={}  manager={}  vetoes={}",
                     c.brain_calls,
                     c.brain_go,
@@ -162,20 +163,20 @@ pub fn spawn(
                     c.brain_wait,
                     c.manager_calls,
                     c.manager_vetoes,
-                );
+                ));
                 if c.last_signal.is_some() {
-                    info!("│ 🔍 last_signal : {}", fmt_signal_compact(&c.last_signal));
+                    emit_status_line(format_args!("│ 🔍 last_signal : {}", fmt_signal_compact(&c.last_signal)));
                 }
                 if c.last_block.is_some() {
-                    info!("│ 🚫 last_block  : {}", fmt_block_compact(&c.last_block));
+                    emit_status_line(format_args!("│ 🚫 last_block  : {}", fmt_block_compact(&c.last_block)));
                 }
                 if c.last_brain.is_some() {
-                    info!("│ 🤖 last_brain  : {}", fmt_brain_compact(&c.last_brain));
+                    emit_status_line(format_args!("│ 🤖 last_brain  : {}", fmt_brain_compact(&c.last_brain)));
                 }
                 if let Some(m) = c.last_manager.as_ref() {
-                    info!("│ 👔 last_manager: {} {}: {}", short_sym(&m.symbol), m.stage, m.reason);
+                    emit_status_line(format_args!("│ 👔 last_manager: {} {}: {}", short_sym(&m.symbol), m.stage, m.reason));
                 }
-                info!("└───────────────────────────────────────────");
+                emit_status_line("└───────────────────────────────────────────");
             }
         });
     }
@@ -288,23 +289,23 @@ pub fn spawn(
                 AgentEvent::ControlCommand(ControlCommand::StatusRequest) => {
                     let c = counters.lock();
                     let now = Utc::now();
-                    info!("┌─ ARIA STATUS (on-demand) ──────────────────");
-                    info!("│ 💹 {}", fmt_prices_compact(&c.prices, now));
-                    info!(
+                    emit_status_line("┌─ ARIA STATUS (on-demand) ──────────────────");
+                    emit_status_line(format_args!("│ 💹 {}", fmt_prices_compact(&c.prices, now)));
+                    emit_status_line(format_args!(
                         "│ 📊 candles={}  signals={}  allowed={}  blocked={}  fills={}  trades={}",
                         fmt_candles_compact(&c.candles),
                         c.signals, c.risk_allowed, c.risk_blocked,
                         c.orders_filled, c.trades_total,
-                    );
-                    info!(
+                    ));
+                    emit_status_line(format_args!(
                         "│ 🧠 brain={}  go={}  nogo={}  wait={}  manager={}  vetoes={}",
                         c.brain_calls, c.brain_go, c.brain_nogo,
                         c.brain_wait, c.manager_calls, c.manager_vetoes,
-                    );
-                    info!("│ 🔍 last_signal : {}", fmt_signal_compact(&c.last_signal));
-                    info!("│ 🚫 last_block  : {}", fmt_block_compact(&c.last_block));
-                    info!("│ 🤖 last_brain  : {}", fmt_brain_compact(&c.last_brain));
-                    info!("└────────────────────────────────────────────");
+                    ));
+                    emit_status_line(format_args!("│ 🔍 last_signal : {}", fmt_signal_compact(&c.last_signal)));
+                    emit_status_line(format_args!("│ 🚫 last_block  : {}", fmt_block_compact(&c.last_block)));
+                    emit_status_line(format_args!("│ 🤖 last_brain  : {}", fmt_brain_compact(&c.last_brain)));
+                    emit_status_line("└────────────────────────────────────────────");
                 }
                 AgentEvent::OrderFilled {
                     client_id,
