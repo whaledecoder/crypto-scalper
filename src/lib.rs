@@ -16,5 +16,6 @@ pub mod llm;
 pub mod microstructure;
 pub mod monitoring;
 pub mod portfolio;
+pub mod quant;
 pub mod research;
 pub mod strategy;

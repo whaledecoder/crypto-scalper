@@ -25,6 +25,8 @@ pub struct Config {
     pub survival: SurvivalCfg,
     #[serde(default)]
     pub control: ControlCfg,
+    #[serde(default)]
+    pub quant: QuantCfg,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -423,6 +425,53 @@ pub struct ControlCfg {
 fn default_telegram_poll() -> u64 {
     3
 }
+
+/// Quant engine configuration — Kelly, vol targeting, VaR, IC, Kalman.
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
+pub struct QuantCfg {
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    #[serde(default = "default_quant_kelly_cap")]
+    pub kelly_cap: f64,
+    #[serde(default = "default_quant_kelly_min_trades")]
+    pub kelly_min_trades: usize,
+    #[serde(default = "default_quant_target_vol")]
+    pub target_vol_annual: f64,
+    #[serde(default = "default_quant_max_vol_mult")]
+    pub max_vol_multiplier: f64,
+    #[serde(default = "default_quant_vol_window")]
+    pub vol_window: usize,
+    #[serde(default = "default_quant_var_confidence")]
+    pub var_confidence: f64,
+    #[serde(default = "default_quant_max_var_pct")]
+    pub max_var_pct: f64,
+    #[serde(default = "default_quant_ic_window")]
+    pub ic_window: usize,
+    #[serde(default = "default_quant_ic_min_abs")]
+    pub ic_min_abs: f64,
+    #[serde(default = "default_quant_ic_max_boost")]
+    pub ic_max_boost: u8,
+    #[serde(default = "default_quant_kalman_q")]
+    pub kalman_process_noise: f64,
+    #[serde(default = "default_quant_kalman_r")]
+    pub kalman_measurement_noise: f64,
+    #[serde(default = "default_quant_kalman_min_bps")]
+    pub kalman_min_velocity_bps: f64,
+}
+
+fn default_quant_kelly_cap() -> f64 { 0.25 }
+fn default_quant_kelly_min_trades() -> usize { 20 }
+fn default_quant_target_vol() -> f64 { 0.15 }
+fn default_quant_max_vol_mult() -> f64 { 2.0 }
+fn default_quant_vol_window() -> usize { 60 }
+fn default_quant_var_confidence() -> f64 { 0.95 }
+fn default_quant_max_var_pct() -> f64 { 0.03 }
+fn default_quant_ic_window() -> usize { 50 }
+fn default_quant_ic_min_abs() -> f64 { 0.05 }
+fn default_quant_ic_max_boost() -> u8 { 10 }
+fn default_quant_kalman_q() -> f64 { 0.01 }
+fn default_quant_kalman_r() -> f64 { 1.0 }
+fn default_quant_kalman_min_bps() -> f64 { 3.0 }
 
 impl Config {
     /// Load default + optional overlay TOML, then apply environment variable

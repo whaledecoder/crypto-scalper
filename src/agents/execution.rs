@@ -15,9 +15,11 @@ use crate::agents::messages::{
 use crate::agents::MessageBus;
 use crate::data::Side;
 use crate::execution::{
-    orders::OrderType, Exchange, OrderRequest, Position, PositionBook, PositionExitReason,
-    RiskManager,
+    orders::OrderType, Exchange, OrderRequest, Position, PositionBook, PositionConfig,
+    PositionExitReason, RiskManager,
 };
+use crate::execution::quality::{ExecutionQuality, TradeQualityRecord};
+use crate::execution::limit_order::plan_limit_order;
 use chrono::Utc;
 use parking_lot::Mutex as PlMutex;
 use std::collections::HashMap;
@@ -50,6 +52,17 @@ pub fn spawn(deps: ExecutionAgentDeps) -> JoinHandle<()> {
     let bus_for_close = bus.clone();
     let survival = Arc::new(PlMutex::new(None::<SurvivalState>));
     let last_marks: Arc<PlMutex<HashMap<String, f64>>> = Arc::new(PlMutex::new(HashMap::new()));
+    let last_books: Arc<PlMutex<HashMap<String, (f64, f64, f64, f64)>>> = Arc::new(PlMutex::new(HashMap::new()));
+    let exec_quality = Arc::new(PlMutex::new(ExecutionQuality::default()));
+    let decision_prices: Arc<PlMutex<HashMap<String, f64>>> = Arc::new(PlMutex::new(HashMap::new()));
+    let pos_cfg = PositionConfig {
+        max_hold_secs: 1800,   // 30 min max hold for scalping
+        trail_atr_mult: 0.5,   // Trail at 0.5× ATR
+        trail_activate_r: 1.0, // Activate trailing at 1R profit
+        breakeven_r: 0.5,      // Move SL to entry at 0.5R profit
+        partial_tp_enabled: false, // Disabled — broker handles TP
+        partial_tp_r: 1.0,
+    };
 
     tokio::spawn(async move {
         info!("execution agent starting");
@@ -59,13 +72,10 @@ pub fn spawn(deps: ExecutionAgentDeps) -> JoinHandle<()> {
                     last_marks.lock().insert(symbol.clone(), trade.price);
                     // Mark-price exit checks happen here so we own the
                     // bus emission when a position closes.
-                    let exits = book.check_exits(&symbol, trade.price);
+                    let exits = book.check_exits(&symbol, trade.price, &pos_cfg);
                     for (pos, reason) in exits {
                         let pnl = crate::execution::position::pnl_usd(&pos, trade.price);
                         risk.on_position_closed(pnl);
-                        // Cancel any lingering protective orders for this
-                        // client_id (best-effort — broker may already have
-                        // closed the position via stop trigger).
                         let _ = exchange.cancel_all(&pos.symbol).await;
                         bus_for_close.publish(AgentEvent::PositionClosed {
                             client_id: pos.client_id.clone(),
@@ -78,6 +88,15 @@ pub fn spawn(deps: ExecutionAgentDeps) -> JoinHandle<()> {
                             reason,
                         });
                     }
+                }
+                AgentEvent::BookTicker {
+                    symbol,
+                    best_bid,
+                    bid_qty,
+                    best_ask,
+                    ask_qty,
+                } => {
+                    last_books.lock().insert(symbol, (best_bid, bid_qty, best_ask, ask_qty));
                 }
                 AgentEvent::SurvivalUpdated(s) => {
                     *survival.lock() = Some(s);
@@ -166,8 +185,54 @@ pub fn spawn(deps: ExecutionAgentDeps) -> JoinHandle<()> {
                         continue;
                     }
 
+                    // Record decision price for execution quality tracking
+                    decision_prices.lock().insert(
+                        v.proposal.symbol.clone(),
+                        v.proposal.entry,
+                    );
+
                     let req = build_entry_request(&v);
-                    match exchange.place_order(&req).await {
+
+                    // Smart order routing: use limit order when spread allows
+                    // Scoped so the MutexGuard is dropped before any .await
+                    let (use_limit, limit_price) = {
+                        let books = last_books.lock();
+                        if let Some((bid, _bq, ask, _aq)) = books.get(&v.proposal.symbol) {
+                            let mid = (bid + ask) / 2.0;
+                            let spread_bps = (ask - bid) / mid * 10_000.0;
+                            if spread_bps > 1.5 {
+                                if let Some(plan) = plan_limit_order(
+                                    req.side,
+                                    *bid,
+                                    *ask,
+                                    v.proposal.entry,
+                                    0.0,
+                                    1.0,
+                                    5.0,
+                                ) {
+                                    (true, Some(plan.price))
+                                } else {
+                                    (false, None)
+                                }
+                            } else {
+                                (false, None)
+                            }
+                        } else {
+                            (false, None)
+                        }
+                    }; // books guard dropped here
+
+                    let actual_req = if use_limit && limit_price.is_some() {
+                        OrderRequest {
+                            order_type: OrderType::Limit,
+                            price: limit_price,
+                            ..req.clone()
+                        }
+                    } else {
+                        req.clone()
+                    };
+
+                    match exchange.place_order(&actual_req).await {
                         Ok(ack) => {
                             let fill_price = if ack.avg_fill_price > 0.0 {
                                 ack.avg_fill_price
@@ -182,6 +247,28 @@ pub fn spawn(deps: ExecutionAgentDeps) -> JoinHandle<()> {
                                 continue;
                             }
                             risk.on_position_opened();
+
+                            // Record execution quality
+                            if let Some(decision_px) = decision_prices.lock().remove(&req.symbol) {
+                                let arrival_px = last_marks.lock().get(&req.symbol).copied().unwrap_or(fill_price);
+                                exec_quality.lock().record(TradeQualityRecord {
+                                    symbol: req.symbol.clone(),
+                                    decision_price: decision_px,
+                                    arrival_price: arrival_px,
+                                    fill_price,
+                                    side: req.side,
+                                    size: req.size,
+                                });
+                                let is = (fill_price - decision_px).abs() / decision_px * 10_000.0;
+                                if is > 5.0 {
+                                    info!(
+                                        symbol = %req.symbol,
+                                        is_bps = %format!("{:.1}", is),
+                                        "execution: high implementation shortfall"
+                                    );
+                                }
+                            }
+
                             info!(
                                 symbol = %req.symbol,
                                 side  = %format!("{:?}", req.side),
@@ -201,10 +288,11 @@ pub fn spawn(deps: ExecutionAgentDeps) -> JoinHandle<()> {
                                 take_profit: req.take_profit,
                                 opened_at: Utc::now(),
                                 trailing_activated: false,
-                                // Use actual fill price so trailing stop activation
-                                // is anchored to real entry, not the requested price.
                                 peak_price: fill_price,
                                 trough_price: fill_price,
+                                atr_at_entry: 0.0, // Will use profit-based fallback
+                                partial_taken: false,
+                                breakeven_activated: false,
                             };
                             book.open(pos.clone());
 

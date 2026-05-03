@@ -27,6 +27,7 @@ use crate::agents::messages::{
     AgentEvent, AgentId, ControlCommand, FeedsSnapshotMsg, SurvivalMode, SurvivalState,
 };
 use crate::agents::MessageBus;
+use crate::backtest::monte_carlo::drawdown_confidence_intervals;
 use crate::config::SurvivalCfg;
 use crate::execution::{Exchange, RiskManager};
 use chrono::{DateTime, Duration as ChronoDuration, NaiveDate, Utc};
@@ -59,6 +60,8 @@ struct SurvivalInner {
     funding_rate: f64,
     /// Last computed state — re-broadcast on every refresh tick.
     last_state: Option<SurvivalState>,
+    /// PnL history for Monte Carlo drawdown CI (last 200 trades).
+    pnl_history: Vec<f64>,
 }
 
 pub struct SurvivalAgentDeps {
@@ -235,6 +238,10 @@ fn on_position_closed(inner: &Arc<Mutex<SurvivalInner>>, pnl: f64, cfg: &Surviva
 
     g.daily_pnl += pnl;
     g.recent_closes.push_back((now, pnl));
+    g.pnl_history.push(pnl);
+    if g.pnl_history.len() > 200 {
+        g.pnl_history.remove(0);
+    }
     while let Some((t, _)) = g.recent_closes.front() {
         if (now - *t) > ChronoDuration::hours(24) {
             g.recent_closes.pop_front();
@@ -406,15 +413,28 @@ fn recompute(
     let mut ratchet_locked = false;
     if realized_pct >= cfg.daily_pnl_ratchet_pct {
         let lock_floor = snap.realized_pnl_today * 0.5;
-        // Once we've locked, we require the daily PnL to stay above
-        // `lock_floor` to keep trading. If a new loss drops us below,
-        // freeze for the rest of the day.
         if snap.realized_pnl_today < lock_floor {
             ratchet_locked = true;
             reasons.push(format!(
                 "ratchet locked: daily PnL ${:.2} < lock ${:.2}",
                 snap.realized_pnl_today, lock_floor
             ));
+        }
+    }
+
+    // Monte Carlo drawdown CI — project expected drawdown from recent
+    // trade history. If P95 drawdown exceeds the auto-flat threshold,
+    // proactively reduce the survival score.
+    if g.pnl_history.len() >= 20 {
+        if let Some(mc) = drawdown_confidence_intervals(&g.pnl_history, 100) {
+            if mc.p95 > cfg.auto_flat_drawdown_pct {
+                let penalty = ((mc.p95 - cfg.auto_flat_drawdown_pct) * 5.0).min(20.0) as i32;
+                score -= penalty;
+                reasons.push(format!(
+                    "MC drawdown P95={:.1}% (P50={:.1}%)",
+                    mc.p95, mc.p50
+                ));
+            }
         }
     }
 
