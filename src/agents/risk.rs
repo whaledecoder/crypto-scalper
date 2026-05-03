@@ -123,11 +123,7 @@ pub fn spawn(
                                 effective_ta_threshold: cfg.base_min_ta_threshold,
                                 effective_llm_floor: cfg.base_min_llm_floor,
                                 matched_lessons: vec![],
-                                reason: Some(format!(
-                                    "survival mode {} (score {})",
-                                    s.mode.as_str(),
-                                    s.score
-                                )),
+                            reason: Some(format!("survival {}", s.mode.as_str())),
                             }));
                             continue;
                         }
@@ -169,16 +165,13 @@ pub fn spawn(
                             effective_ta_threshold,
                             effective_llm_floor: llm_floor,
                             matched_lessons: verdict.matched_lessons,
-                            reason: Some(format!(
-                                "TA {} < threshold {}",
-                                signal.ta_confidence, effective_ta_threshold
-                            )),
+                            reason: Some(format!("TA {} < {}", signal.ta_confidence, effective_ta_threshold)),
                         }));
                         continue;
                     }
 
                     if let Err(e) = risk.can_open_position() {
-                        warn!(symbol = %signal.symbol, reason = %e, "risk gate blocked");
+                        warn!(symbol = %signal.symbol, reason = %e, "risk blocked");
                         bus.publish(AgentEvent::RiskVerdict(RiskVerdictMsg {
                             signal: signal.clone(),
                             regime,
@@ -202,7 +195,7 @@ pub fn spawn(
                         spread_pct,
                         &cfg.tcm,
                     ) {
-                        warn!(symbol = %signal.symbol, reason = %e, "risk signal gate blocked");
+                        warn!(symbol = %signal.symbol, reason = %e, "risk blocked");
                         bus.publish(AgentEvent::RiskVerdict(RiskVerdictMsg {
                             signal: signal.clone(),
                             regime,
@@ -233,11 +226,7 @@ pub fn spawn(
                             effective_ta_threshold,
                             effective_llm_floor: llm_floor,
                             matched_lessons: verdict.matched_lessons,
-                            reason: Some(format!(
-                                "extreme funding {:.4}% (threshold ±{:.4}%)",
-                                funding_rate * 100.0,
-                                cfg.funding_block_threshold * 100.0
-                            )),
+                            reason: Some(format!("funding {:.4}%", funding_rate * 100.0)),
                         }));
                         continue;
                     }

@@ -29,7 +29,7 @@ pub fn spawn(
     poll_secs: u64,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
-        info!(?symbols, poll_secs, "feeds agent starting");
+        info!("feeds agent starting");
         let mut tick = tokio::time::interval(Duration::from_secs(poll_secs.max(15)));
         loop {
             tick.tick().await;

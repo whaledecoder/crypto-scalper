@@ -53,7 +53,7 @@ async fn main() -> Result<()> {
     let cfg = Config::load(&default_path, overlay_path.as_deref())
         .context("failed to load configuration")?;
 
-    info!(mode = %cfg.mode.run_mode, dry_run = cfg.mode.dry_run, "starting ARIA");
+    info!("starting ARIA");
 
     match cfg.mode.run_mode.as_str() {
         "backtest" => run_backtest(&cfg).await,
@@ -66,6 +66,7 @@ fn init_tracing() {
     tracing_subscriber::fmt()
         .with_env_filter(filter)
         .with_target(false)
+        .without_time()
         .compact()
         .init();
 }
@@ -220,7 +221,7 @@ async fn run_agents(cfg: Config) -> Result<()> {
             cfg.exchange.recv_window_ms,
         ))
     } else {
-        info!("paper/dry-run mode — simulated exchange");
+        info!("paper mode");
         Arc::new(PaperExchange::new(2.0, cfg.risk.equity_usd))
     };
 
@@ -263,7 +264,7 @@ async fn run_agents(cfg: Config) -> Result<()> {
         model = %cfg.llm.model,
         api_base = %cfg.llm.api_base,
         key_set = !cfg.llm.api_key.is_empty(),
-        "brain llm configured"
+        "LLM ready"
     );
     let llm = Arc::new(LlmEngine::new(LlmEngineConfig {
         provider,
@@ -604,11 +605,7 @@ async fn run_agents(cfg: Config) -> Result<()> {
         ))
         .await;
 
-    info!(
-        symbols = ?cfg.pairs.symbols,
-        manager = cfg.manager.enabled,
-        "all agents spawned — runtime live"
-    );
+    info!("runtime live");
 
     // --- Midnight daily-reset task ---
     // Without this, RiskManager.realized_pnl_today accumulates forever

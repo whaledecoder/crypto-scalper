@@ -187,7 +187,7 @@ pub async fn bootstrap_states(
     let symbols: Vec<String> = states.lock().await.keys().cloned().collect();
 
     for symbol in &symbols {
-        info!(symbol = %symbol, candles = BOOTSTRAP_LIMIT, "bootstrapping historical klines");
+        info!(symbol = %symbol, "bootstrap start");
 
         match fetch_bootstrap_klines(&client, rest_base_url, symbol, timeframe, BOOTSTRAP_LIMIT)
             .await
@@ -202,20 +202,11 @@ pub async fn bootstrap_states(
                     for c in candles {
                         state.on_closed(c);
                     }
-                    info!(
-                        symbol = %symbol,
-                        seeded = n,
-                        ema200_ready = state.ema_200.value().is_some(),
-                        ema50_ready  = state.ema_50.value().is_some(),
-                        adx_ready    = state.last_adx.is_some(),
-                        rsi_ready    = state.last_rsi.is_some(),
-                        bb_ready     = state.last_bb.is_some(),
-                        "bootstrap complete"
-                    );
+                    info!(symbol = %symbol, seeded = n, "bootstrap ok");
                 }
             }
             Err(e) => {
-                warn!(symbol = %symbol, error = %e, "bootstrap failed — indicators will warm up live");
+                warn!(symbol = %symbol, error = %e, "bootstrap failed");
             }
         }
     }
