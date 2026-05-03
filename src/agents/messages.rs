@@ -6,7 +6,7 @@ use crate::execution::PositionExitReason;
 use crate::feeds::ExternalSnapshot;
 use crate::llm::engine::TradeDecision;
 use crate::strategy::state::PreSignal;
-use crate::strategy::Regime;
+use crate::strategy::{Regime, StrategyName};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
@@ -56,7 +56,14 @@ pub enum AgentEvent {
         ask_qty: f64,
     },
     /// `DataAgent` finalized a candle for a symbol.
-    CandleClosed { symbol: String, candle: Candle },
+    CandleClosed {
+        symbol: String,
+        timeframe_secs: i64,
+        candle: Candle,
+    },
+    /// `SignalAgent` evaluated a closed candle but did not emit a tradeable
+    /// pre-signal. Used by monitor/control surfaces to explain quiet runs.
+    SignalEvaluation(SignalEvaluationMsg),
     /// `FeedsAgent` published an updated external snapshot for a symbol.
     FeedsSnapshot(FeedsSnapshotMsg),
     /// `SignalAgent` produced a pre-signal candidate.
@@ -185,6 +192,18 @@ pub struct FeedsSnapshotMsg {
     pub symbol: String,
     pub snapshot: ExternalSnapshot,
     pub ts: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone)]
+pub struct SignalEvaluationMsg {
+    pub symbol: String,
+    pub timeframe_secs: i64,
+    pub regime: Option<Regime>,
+    pub candles: usize,
+    pub strategies: Vec<StrategyName>,
+    pub reason: String,
+    pub best_strategy: Option<StrategyName>,
+    pub best_confidence: Option<u8>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

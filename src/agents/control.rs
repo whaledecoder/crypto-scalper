@@ -3,7 +3,7 @@
 //! Provides three ingress paths:
 //!
 //! 1. **Telegram bot long-poll** (`/status`, `/positions`, `/freeze`,
-//!    `/unfreeze`, `/flat`, `/health`).
+//!    `/unfreeze`, `/flat`, `/health`, `/help`).
 //! 2. **Terminal stdin** (`status`, `positions`, `freeze`, `unfreeze`,
 //!    `flat`, `health`, `help`) when running interactively.
 //! 3. **Internal control file** at `/tmp/aria.control` — write a
@@ -195,9 +195,7 @@ async fn send_telegram(client: &Client, token: &str, chat_id: &str, text: &str) 
 
 async fn stdin_loop(bus: MessageBus, risk: Arc<RiskManager>, book: Arc<PositionBook>) {
     let mut lines = io::BufReader::new(io::stdin()).lines();
-    info!(
-        "stdin control ready — commands: status, positions, freeze, unfreeze, flat, health, help"
-    );
+    info!("stdin control ready — type `help`, then press Enter");
     loop {
         match lines.next_line().await {
             Ok(Some(line)) => {
@@ -225,6 +223,7 @@ fn handle_command(
     let cmd = text.trim().to_lowercase();
     match cmd.as_str() {
         "/status" | "status" => {
+            bus.publish(AgentEvent::ControlCommand(ControlCommand::StatusRequest));
             let s = risk.snapshot();
             let positions = book.snapshot().len();
             format!(
@@ -235,7 +234,8 @@ fn handle_command(
                 Drawdown: {:.2}%\n\
                 Open positions: {} (book: {})\n\
                 Frozen: {}\n\
-                Tripped: {}",
+                Tripped: {}\n\
+                Runtime pipeline snapshot is printed in the log as `status requested`.",
                 s.equity,
                 s.peak_equity,
                 s.realized_pnl_today,
@@ -286,10 +286,19 @@ fn handle_command(
             }));
             "🔻 flat-all dispatched".to_string()
         }
-        "/health" | "health" => "❤️ OK (see /metrics for details)".to_string(),
-        "/help" | "help" | "/start" | "start" => {
-            "*ARIA commands:* /status /positions /freeze /unfreeze /flat /health".to_string()
+        "/health" | "health" => {
+            bus.publish(AgentEvent::ControlCommand(ControlCommand::StatusRequest));
+            "OK — runtime pipeline snapshot printed in log; use `positions` for open trades."
+                .to_string()
         }
+        "/help" | "help" | "/start" | "start" => "*ARIA commands:*\n\
+             status    - risk + latest pipeline snapshot in logs\n\
+             positions - open paper/live positions\n\
+             flat      - close every open position and freeze\n\
+             freeze    - block new entries\n\
+             unfreeze  - resume entries\n\
+             health    - publish runtime health snapshot"
+            .to_string(),
         _ => String::new(),
     }
 }
@@ -320,7 +329,9 @@ async fn file_loop(bus: MessageBus, path: PathBuf) {
                 "flat" => bus.publish(AgentEvent::ControlCommand(ControlCommand::FlatAll {
                     reason: "control file".into(),
                 })),
-                "status" => bus.publish(AgentEvent::ControlCommand(ControlCommand::StatusRequest)),
+                "status" | "health" => {
+                    bus.publish(AgentEvent::ControlCommand(ControlCommand::StatusRequest))
+                }
                 _ => {}
             }
         }

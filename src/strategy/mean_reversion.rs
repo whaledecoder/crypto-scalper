@@ -83,7 +83,7 @@ impl Strategy for MeanReversion {
 
 fn score_confidence(rsi: f64, vol_ratio: f64, adx: f64) -> u8 {
     let mut score: f64 = 62.0; // Base slightly above the 60 threshold
-    // RSI extremes → higher confidence
+                               // RSI extremes → higher confidence
     if !(20.0..=80.0).contains(&rsi) {
         score += 15.0;
     } else if !(30.0..=70.0).contains(&rsi) {

@@ -58,9 +58,8 @@ impl Strategy for Squeeze {
             score += 5.0;
         }
         // Price beyond BB band = stronger expansion
-        if side == Side::Long && c.close > bb.upper {
-            score += 3.0;
-        } else if side == Side::Short && c.close < bb.lower {
+        if (side == Side::Long && c.close > bb.upper) || (side == Side::Short && c.close < bb.lower)
+        {
             score += 3.0;
         }
 

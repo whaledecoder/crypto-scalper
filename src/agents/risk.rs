@@ -22,7 +22,7 @@ use crate::data::Side;
 use crate::execution::tcm::TransactionCostModel;
 use crate::execution::RiskManager;
 use crate::learning::LearningPolicy;
-use crate::quant::QuantEngine;
+use crate::quant::{QuantEngine, QuantSizingInput};
 use parking_lot::Mutex;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -123,7 +123,7 @@ pub fn spawn(
                                 effective_ta_threshold: cfg.base_min_ta_threshold,
                                 effective_llm_floor: cfg.base_min_llm_floor,
                                 matched_lessons: vec![],
-                            reason: Some(format!("survival {}", s.mode.as_str())),
+                                reason: Some(format!("survival {}", s.mode.as_str())),
                             }));
                             continue;
                         }
@@ -165,7 +165,10 @@ pub fn spawn(
                             effective_ta_threshold,
                             effective_llm_floor: llm_floor,
                             matched_lessons: verdict.matched_lessons,
-                            reason: Some(format!("TA {} < {}", signal.ta_confidence, effective_ta_threshold)),
+                            reason: Some(format!(
+                                "TA {} < {}",
+                                signal.ta_confidence, effective_ta_threshold
+                            )),
                         }));
                         continue;
                     }
@@ -237,16 +240,15 @@ pub fn spawn(
 
                     // Apply quant engine sizing (Kelly, vol-target, VaR, Kalman)
                     let (size, _quant_reason) = if let Some(ref qe) = quant_engine {
-                        let qr = qe.compute_sizing(
-                            &signal.symbol,
-                            signal.strategy.as_str(),
-                            signal.side,
-                            signal.ta_confidence,
-                            signal.entry,
-                            signal.stop_loss,
-                            risk.equity(),
-                            cfg.base_risk_pct,
-                        );
+                        let qr = qe.compute_sizing(QuantSizingInput {
+                            symbol: &signal.symbol,
+                            strategy: signal.strategy.as_str(),
+                            side: signal.side,
+                            entry: signal.entry,
+                            stop_loss: signal.stop_loss,
+                            equity: risk.equity(),
+                            base_risk_pct: cfg.base_risk_pct,
+                        });
                         if qr.var_rejected {
                             bus.publish(AgentEvent::RiskVerdict(RiskVerdictMsg {
                                 signal: signal.clone(),

@@ -2,7 +2,7 @@
 //! state, runs the regime detector + active strategies, and emits a
 //! `PreSignalEmitted` event for the best candidate.
 
-use crate::agents::messages::AgentEvent;
+use crate::agents::messages::{AgentEvent, SignalEvaluationMsg};
 use crate::agents::MessageBus;
 use crate::config::{AdvancedAlphaCfg, Schedule};
 use crate::data::Side;
@@ -24,25 +24,41 @@ use crate::strategy::{
     RegimeDetector, Strategy,
 };
 use chrono::{DateTime, Duration as ChronoDuration, Timelike, Utc};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
 use tracing::{debug, info};
 
+pub struct SignalAgentConfig {
+    pub active: Vec<StrategyName>,
+    pub schedule: Schedule,
+    pub advanced_alpha: AdvancedAlphaCfg,
+    pub quant_engine: Option<Arc<QuantEngine>>,
+    pub paper_scout_enabled: bool,
+    pub entry_timeframe_secs: i64,
+}
+
 pub fn spawn(
     bus: MessageBus,
     states: Arc<Mutex<HashMap<String, SymbolState>>>,
-    active: Vec<StrategyName>,
-    schedule: Schedule,
-    advanced_alpha: AdvancedAlphaCfg,
-    quant_engine: Option<Arc<QuantEngine>>,
+    cfg: SignalAgentConfig,
 ) -> JoinHandle<()> {
+    let SignalAgentConfig {
+        active,
+        schedule,
+        advanced_alpha,
+        quant_engine,
+        paper_scout_enabled,
+        entry_timeframe_secs,
+    } = cfg;
     let mut rx = bus.subscribe();
     tokio::spawn(async move {
         info!(?active, "signal agent starting");
         let mut ofi_by_symbol: HashMap<String, Ofi> = HashMap::new();
         let mut feeds_by_symbol: HashMap<String, TimedExternalSnapshot> = HashMap::new();
+        let mut higher_timeframes: HashMap<String, BTreeMap<i64, HigherTimeframeSnapshot>> =
+            HashMap::new();
         while let Ok(ev) = rx.recv().await {
             match ev {
                 AgentEvent::FeedsSnapshot(msg) => {
@@ -75,19 +91,39 @@ pub fn spawn(
                         }
                     }
                 }
-                AgentEvent::CandleClosed { symbol, candle } => {
-                    if in_dead_zone(&schedule) {
-                        debug!(
-                            symbol = %symbol,
-                            "signal: skipping candle (dead zone {}–{} WIB)",
-                            schedule.dead_zone_start_hour_wib,
-                            schedule.dead_zone_end_hour_wib
-                        );
+                AgentEvent::CandleClosed {
+                    symbol,
+                    timeframe_secs,
+                    candle,
+                } => {
+                    if timeframe_secs != entry_timeframe_secs {
+                        higher_timeframes
+                            .entry(symbol)
+                            .or_default()
+                            .insert(timeframe_secs, HigherTimeframeSnapshot::from_candle(candle));
                         continue;
                     }
-                    let (best, regime) = {
+                    if in_dead_zone(&schedule) && !paper_scout_enabled {
+                        bus.publish(AgentEvent::SignalEvaluation(SignalEvaluationMsg {
+                            symbol,
+                            timeframe_secs,
+                            regime: None,
+                            candles: 0,
+                            strategies: Vec::new(),
+                            reason: format!(
+                                "dead_zone_{}-{}_WIB",
+                                schedule.dead_zone_start_hour_wib, schedule.dead_zone_end_hour_wib
+                            ),
+                            best_strategy: None,
+                            best_confidence: None,
+                        }));
+                        continue;
+                    }
+                    let htf = higher_timeframes.get(&symbol).cloned().unwrap_or_default();
+                    let symbol_for_state = symbol.clone();
+                    let (best, regime, candles, chosen, best_seen, forced) = {
                         let mut states = states.lock().await;
-                        let state = match states.get_mut(&symbol) {
+                        let state = match states.get_mut(&symbol_for_state) {
                             Some(s) => s,
                             None => continue,
                         };
@@ -124,7 +160,8 @@ pub fn spawn(
                         );
 
                         let mut best: Option<PreSignal> = None;
-                        for name in chosen {
+                        let mut best_seen: Option<(StrategyName, u8)> = None;
+                        for &name in &chosen {
                             let sig = match name {
                                 StrategyName::EmaRibbon => EmaRibbon.evaluate(state, &candle),
                                 StrategyName::MeanReversion => {
@@ -135,24 +172,25 @@ pub fn spawn(
                                 StrategyName::Squeeze => Squeeze.evaluate(state, &candle),
                             };
                             if let Some(mut s) = sig {
-                                // Multi-timeframe confirmation:
-                                // Use EMA200 as higher-timeframe trend filter.
-                                // Long signals need price > EMA200, shorts need price < EMA200.
-                                // If EMA200 is not warm, skip confirmation (allow trade).
+                                if best_seen
+                                    .as_ref()
+                                    .map(|(_, confidence)| s.ta_confidence > *confidence)
+                                    .unwrap_or(true)
+                                {
+                                    best_seen = Some((s.strategy, s.ta_confidence));
+                                }
                                 if let Some(ema200) = state.ema_200.value() {
                                     let htf_aligned = match s.side {
                                         Side::Long => candle.close > ema200,
                                         Side::Short => candle.close < ema200,
                                     };
                                     if !htf_aligned {
-                                        // HTF contradicts — reduce confidence by 8 points
                                         s.ta_confidence = s.ta_confidence.saturating_sub(8);
                                         s.reason = format!(
                                             "{} | HTF-contradict(ema200={:.2})",
                                             s.reason, ema200
                                         );
                                     } else {
-                                        // HTF confirms — boost confidence by 3 points
                                         s.ta_confidence = (s.ta_confidence + 3).min(100);
                                         s.reason = format!(
                                             "{} | HTF-confirm(ema200={:.2})",
@@ -160,7 +198,6 @@ pub fn spawn(
                                         );
                                     }
                                 }
-
                                 debug!(
                                     symbol = %symbol,
                                     strategy = %s.strategy.as_str(),
@@ -179,19 +216,60 @@ pub fn spawn(
                                 }
                             }
                         }
+                        let mut forced = false;
+                        if best.is_none() && paper_scout_enabled {
+                            best = paper_scout_signal(state, &candle, &htf);
+                            if let Some(s) = &best {
+                                best_seen = Some((s.strategy, s.ta_confidence));
+                                forced = true;
+                            }
+                        }
                         let filtered = apply_advanced_alpha(
                             best,
                             state,
                             feeds_by_symbol.get(&symbol),
                             &advanced_alpha,
                         );
-                        (filtered, regime)
+                        (
+                            filtered,
+                            regime,
+                            state.candles.len(),
+                            chosen,
+                            best_seen,
+                            forced,
+                        )
                     };
                     if let Some(signal) = best {
+                        if forced {
+                            info!(
+                                symbol = %signal.symbol,
+                                side = %signal.side.as_str(),
+                                entry = signal.entry,
+                                sl = signal.stop_loss,
+                                tp = signal.take_profit,
+                                confidence = signal.ta_confidence,
+                                htf = %htf_summary(&htf),
+                                "paper scout htf-aware scalp signal"
+                            );
+                        }
                         bus.publish(AgentEvent::PreSignalEmitted {
                             signal: Box::new(signal),
                             regime,
                         });
+                    } else {
+                        let (best_strategy, best_confidence) = best_seen
+                            .map(|(strategy, confidence)| (Some(strategy), Some(confidence)))
+                            .unwrap_or((None, None));
+                        bus.publish(AgentEvent::SignalEvaluation(SignalEvaluationMsg {
+                            symbol,
+                            timeframe_secs,
+                            regime: Some(regime),
+                            candles,
+                            strategies: chosen,
+                            reason: no_signal_reason(candles, best_strategy, best_confidence),
+                            best_strategy,
+                            best_confidence,
+                        }));
                     }
                 }
                 AgentEvent::ControlCommand(crate::agents::messages::ControlCommand::ResetDaily) => {
@@ -209,6 +287,120 @@ pub fn spawn(
             }
         }
     })
+}
+
+fn paper_scout_signal(
+    state: &SymbolState,
+    candle: &crate::data::Candle,
+    higher_timeframes: &BTreeMap<i64, HigherTimeframeSnapshot>,
+) -> Option<PreSignal> {
+    if state.candles.len() < 3 {
+        return None;
+    }
+    let atr = state
+        .last_atr
+        .unwrap_or_else(|| (candle.high - candle.low).abs().max(candle.close * 0.001));
+    if candle.close <= 0.0 || atr <= 0.0 {
+        return None;
+    }
+    let vwap = state.last_vwap.unwrap_or(candle.close);
+    let bias = higher_timeframe_bias(higher_timeframes);
+    let side = if bias > 0.0 || (bias == 0.0 && candle.close >= vwap) {
+        Side::Long
+    } else {
+        Side::Short
+    };
+    let stop_distance = (0.6 * atr).max(candle.close * 0.001);
+    let take_distance = stop_distance * 1.35;
+    let (stop_loss, take_profit) = match side {
+        Side::Long => (candle.close - stop_distance, candle.close + take_distance),
+        Side::Short => (candle.close + stop_distance, candle.close - take_distance),
+    };
+    Some(PreSignal {
+        symbol: state.symbol.clone(),
+        strategy: StrategyName::VwapScalp,
+        side,
+        entry: candle.close,
+        stop_loss,
+        take_profit,
+        ta_confidence: 60,
+        reason: format!(
+            "paper_scout htf_bias={:.2} close={:.4} vwap={:.4} atr={:.4}",
+            bias, candle.close, vwap, atr
+        ),
+    })
+}
+
+#[derive(Debug, Clone, Copy)]
+struct HigherTimeframeSnapshot {
+    open: f64,
+    close: f64,
+}
+
+impl HigherTimeframeSnapshot {
+    fn from_candle(candle: crate::data::Candle) -> Self {
+        Self {
+            open: candle.open,
+            close: candle.close,
+        }
+    }
+}
+
+fn higher_timeframe_bias(higher_timeframes: &BTreeMap<i64, HigherTimeframeSnapshot>) -> f64 {
+    let total_weight: f64 = higher_timeframes.keys().map(|tf| *tf as f64).sum();
+    if total_weight <= 0.0 {
+        return 0.0;
+    }
+    let weighted = higher_timeframes
+        .iter()
+        .map(|(tf, snapshot)| {
+            let direction = if snapshot.close > snapshot.open {
+                1.0
+            } else if snapshot.close < snapshot.open {
+                -1.0
+            } else {
+                0.0
+            };
+            direction * *tf as f64
+        })
+        .sum::<f64>();
+    (weighted / total_weight).clamp(-1.0, 1.0)
+}
+
+fn htf_summary(higher_timeframes: &BTreeMap<i64, HigherTimeframeSnapshot>) -> String {
+    if higher_timeframes.is_empty() {
+        return "none".to_string();
+    }
+    higher_timeframes
+        .iter()
+        .map(|(tf, snapshot)| {
+            let direction = if snapshot.close > snapshot.open {
+                "bull"
+            } else if snapshot.close < snapshot.open {
+                "bear"
+            } else {
+                "flat"
+            };
+            format!("{}m:{direction}", tf / 60)
+        })
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+fn no_signal_reason(
+    candles: usize,
+    best_strategy: Option<StrategyName>,
+    best_confidence: Option<u8>,
+) -> String {
+    if candles < 20 {
+        return format!("warming_up_candles_{candles}/20");
+    }
+    match (best_strategy, best_confidence) {
+        (Some(strategy), Some(confidence)) => {
+            format!("alpha_gate_filtered_{}:{confidence}", strategy.as_str())
+        }
+        _ => "strategy_conditions_not_met".to_string(),
+    }
 }
 
 fn apply_advanced_alpha(
@@ -328,6 +520,32 @@ mod tests {
             });
         }
         state
+    }
+
+    #[test]
+    fn paper_scout_uses_higher_timeframe_bias() {
+        let state = warmed_state();
+        let candle = *state.last_candle().unwrap();
+        let mut htf = BTreeMap::new();
+        htf.insert(
+            300,
+            HigherTimeframeSnapshot {
+                open: 100.0,
+                close: 99.0,
+            },
+        );
+        htf.insert(
+            900,
+            HigherTimeframeSnapshot {
+                open: 100.0,
+                close: 98.0,
+            },
+        );
+        let signal = paper_scout_signal(&state, &candle, &htf).expect("paper scout signal");
+        assert_eq!(signal.side, Side::Short);
+        assert_eq!(signal.strategy, StrategyName::VwapScalp);
+        assert!(signal.reason.contains("htf_bias=-1.00"));
+        assert!(signal.rr() >= 1.2);
     }
 
     #[test]
